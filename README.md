@@ -31,6 +31,14 @@
 
 ### 词汇
 
+> 2026-03 增加打字练习模式，感谢 @ghn1109
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="public/screenshot/typing-vocabulary-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="public/screenshot/typing-vocabulary-light.png">
+  <img alt="Vocabulary" src="public/screenshot/typing-vocabulary-light.png">
+</picture>
+
 雅思词汇真经（刘洪波橙色的那本）
 
 - 雅思核心词汇
