@@ -2,7 +2,7 @@
 +++
 atmosphere|n.|大气层；氛围|The approaching examination created a tense atmosphere on the campus
 hydrosphere|n.|水圈；大气中的水汽|All the water of the earth's surface is included in the hydrosphere
-lithosphere|n.|岩石圈|The lithosphere and the hydrosphere together form the earth's surface
+lithosphere|n.|岩石圈|The hydrosphere and the lithosphere together form the earth's surface
 ---
 oxygen|n.|氧气|Hydrogen and Oxygen are gases
 oxide|n.|氧化物|Oxide is a part of our daily life
@@ -3675,7 +3675,7 @@ customer|n.|顾客，主顾，客户|If that doesn't work, ask them if they real
 client|n.|顾客；客户；委托人|He proves to be a successful lawyer with lots of clients
 ---
 encounter|v./n.|遭遇；偶遇；邂逅|The more dangerous we encounter, the harder should we push forward
-chase|v./n.|追逐；追求|Please chased the speeding car 
+chase|v./n.|追逐；追求|Please chased the speeding car
 miss|v.|想念；未注意到|The woman missed her baby dreadfully
 ---
 appointment|n.|约会；指派|I made an appointment to see the doctor
@@ -3738,7 +3738,7 @@ specialist|n.|专家；专科医生|She is a specialist in E-business
 consultant|n.|顾问；[英]会诊医师|The consultant committee met at the call of the chairman
 veterinary|adj.|兽医的|Sectioning the nerves in the hoof of a limping horse is a common practice in a veterinary procedure
 ---
-counsellor/counselor|n.|顾问，辅导顾问；（美国的）律师|I'd like to talk to my counselor before I answer any of your questions 
+counsellor/counselor|n.|顾问，辅导顾问；（美国的）律师|I'd like to talk to my counselor before I answer any of your questions
 solicitor|n.|（英国的）诉状律师，事务律师；（美国的）法务官|We asked a solicitor for advice
 attorney|n.|（美国的）律师|The defense attorney's objection was overruled by the judge
 umpire|n.|裁判员|Mike was thrown out of the game for hitting an umpire
@@ -3855,7 +3855,7 @@ polish|v.|擦光，擦亮；使完美，改进|Silver can be easily polished wit
 peel|v.|剥落；掉漆；脱皮|My skin always peels when I've been in the sun
 split|v.|（使）开裂、分开|The crowd split into several groups
 sway|v.|（使）摇摆、摆动、摇晃|Swaying hips properly is the basis of the heel-and-toe walking race
-shake|v./n.|摇动；（使）颤动/摇动；颤动|The movie didn't give me any kind of shake 
+shake|v./n.|摇动；（使）颤动/摇动；颤动|The movie didn't give me any kind of shake
 vibrate|v.|（使）震动、摇摆|Some insects' wings vibrate so fast that the movement is invisible to human eyes
 ---
 whirl|v./n.|（使）回旋/回旋|He whirled about in the yard
