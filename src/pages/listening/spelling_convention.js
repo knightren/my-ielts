@@ -1,5 +1,5 @@
 export default {
-  'Charpter2 拼写规范': {
+  'Chapter2 拼写规范': {
     title: '2.1 通用拼写',
     desc: '下述拼写属于美英通用方式，在考试中不会减分，左右两种都可以',
     columns: ['British', 'American', 'Meaning'],

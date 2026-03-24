@@ -8,14 +8,14 @@ function play(word) {
 }
 
 const keyword = ref('')
-const chapter = ref('Charpter2 拼写规范')
+const chapter = ref('Chapter2 拼写规范')
 const chapters = [
-  'Charpter2 拼写规范',
-  'Charpter3 特别名词',
-  'Charpter4 形容词副词',
+  'Chapter2 拼写规范',
+  'Chapter3 特别名词',
+  'Chapter4 形容词副词',
 ]
 
-const curCharpter = computed(() => {
+const curChapter = computed(() => {
   const { rows } = chapterData[chapter.value]
   rows.forEach((e) => {
     if (typeof e[0] === 'string')
@@ -67,13 +67,13 @@ const curCharpter = computed(() => {
     </div>
   </div>
   <div class="mt-6">
-    <template v-if="chapter === 'Charpter2 拼写规范'">
+    <template v-if="chapter === 'Chapter2 拼写规范'">
       <div class="mb-4 mt-6 items-center justify-between lg:flex">
         <div class="mb-4 lg:mb-0">
           <h3 class="mb-2 font-bold text-gray-900 dark:text-white">
-            {{ curCharpter.title }}
+            {{ curChapter.title }}
           </h3>
-          <span class="text-base font-normal text-gray-500 dark:text-gray-400">{{ curCharpter.desc }}</span>
+          <span class="text-base font-normal text-gray-500 dark:text-gray-400">{{ curChapter.desc }}</span>
         </div>
       </div>
       <table class="w-full text-left text-sm text-gray-500 dark:text-gray-400">
@@ -86,7 +86,7 @@ const curCharpter = computed(() => {
               <!-- Pronunciation -->
             </th>
             <th
-              v-for="label in curCharpter.columns"
+              v-for="label in curChapter.columns"
               :key="label"
               class="w-0 px-6 py-3"
             >
@@ -96,7 +96,7 @@ const curCharpter = computed(() => {
         </thead>
         <tbody>
           <tr
-            v-for="(row, index) in curCharpter.rows"
+            v-for="(row, index) in curChapter.rows"
             :key="row[0]"
             class="border-b bg-white dark:border-gray-700 dark:bg-gray-800"
           >

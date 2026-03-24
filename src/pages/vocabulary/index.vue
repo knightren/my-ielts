@@ -147,12 +147,12 @@ function onInputKeydown(e) {
   }
 }
 
-function onInputFoucsIn(e, audioPath) {
+function onInputFocusIn(e, audioPath) {
   if (isAutoPlayWordAudio.value)
     play(audioPath)
 }
 
-function onInputFoucsOut(e, item) {
+function onInputFocusOut(e, item) {
   const { target } = e
   const spellValue = target.value.toLowerCase().trim()
   if (spellValue.length < 1) {
@@ -336,8 +336,8 @@ function copyAllError() {
                           <input
                             :id="item.id" autocomplete="off" :class="getInputStyleClass(item)"
                             type="text"
-                            @focusout="onInputFoucsOut($event, item)" 
-                            @focusin="onInputFoucsIn($event, `vocabulary/audio/${category}/${item.word[0]}.mp3`)" 
+                            @focusout="onInputFocusOut($event, item)" 
+                            @focusin="onInputFocusIn($event, `vocabulary/audio/${category}/${item.word[0]}.mp3`)" 
                             @keydown="onInputKeydown"
                           >
                         </template>

@@ -12,7 +12,7 @@ const menus = reactive([
   },
   {
     label: '语法',
-    icon: 'i-carbon-load-balancer-vpc ',
+    icon: 'i-carbon-load-balancer-vpc',
     link: '/grammar',
   },
   {
@@ -94,7 +94,6 @@ const showMobileMenu = ref(false)
       <!-- Mobile menu -->
       <ul
         v-show="showMobileMenu"
-        style="display: none"
         class="mt-0 w-full flex-col pt-16 text-sm font-medium lg:hidden"
       >
         <li
