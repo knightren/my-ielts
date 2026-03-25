@@ -7,3 +7,5 @@ dist-ssr
 node_modules
 .idea/
 *.log
+# git rm --cached auto-imports.d.ts
+auto-imports.d.ts
