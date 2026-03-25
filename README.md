@@ -31,7 +31,7 @@
 
 ### 词汇
 
-> 2026-03 增加打字练习模式，感谢 @ghn1109
+> 2026-03 增加打字练习模式，感谢 [@Tommy1109255](https://github.com/Tommy1109255)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="public/screenshot/typing-vocabulary-dark.png">
