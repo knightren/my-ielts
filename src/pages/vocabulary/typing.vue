@@ -52,12 +52,21 @@ function playAudio() {
   audio.play()
 }
 
+// Normalize whitespace: replace non-breaking spaces and other unicode spaces with regular space
+function normalizeInput(s: string) {
+  return s.replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, ' ')
+}
+
 function handleInput(e: Event) {
   if (!startTime.value)
     startTime.value = Date.now()
 
-  const input = (e.target as HTMLInputElement).value
+  const rawInput = (e.target as HTMLInputElement).value
+  const input = normalizeInput(rawInput)
   userInput.value = input
+  // Sync normalized value back to DOM input
+  if (rawInput !== input)
+    (e.target as HTMLInputElement).value = input
 
   // Calculate Accuracy
   let correctChars = 0
@@ -176,6 +185,10 @@ onMounted(() => {
           type="text"
           class="absolute inset-0 opacity-0 w-full h-full cursor-default caret-transparent"
           autofocus
+          autocapitalize="off"
+          autocorrect="off"
+          autocomplete="off"
+          spellcheck="false"
           v-model="userInput"
           @input="handleInput"
           :disabled="isFinished"
