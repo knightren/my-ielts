@@ -6,6 +6,10 @@ const ws = reactive(words)
 
 const activeTab = ref('keywords')
 const activeKeywordView = ref('list')
+const planningDays = ref(7)
+const activePlanLabel = ref('')
+const activePlanWordKeys = ref([])
+const flashcardCategoryFilter = ref('all')
 const keyword = ref('')
 const columnVisibility = reactive({
   word: true,
@@ -22,11 +26,13 @@ const flashcardReviewOptions = reactive({
 })
 const flashcardStatuses = reactive({})
 const flashcardReviewedAt = reactive({})
+const flashcardMemoryCounts = reactive({})
 const flashcardOrder = ref([])
 const flashcardFullscreenEl = ref(null)
 const isFlashcardFullscreen = ref(false)
 const FLASHCARD_STATUS_STORAGE_KEY = 'reading-538-flashcard-statuses'
 const FLASHCARD_REVIEWED_AT_STORAGE_KEY = 'reading-538-flashcard-reviewed-at'
+const FLASHCARD_MEMORY_COUNT_STORAGE_KEY = 'reading-538-flashcard-memory-counts'
 let autoNextTimer = null
 const scoreTable = [
   ['39-40', '9.0'],
@@ -158,6 +164,11 @@ const summaryList = [
 ]
 const exampleMap = createExampleMap(keywordMarkdown)
 const wordMetaMap = createWordMetaMap(words, exampleMap)
+const categoryPlanTargets = {
+  '第 1 类考点词': 20,
+  '第 2 类考点词': 10,
+  '第 3 类考点词': 10,
+}
 
 const filteredCategories = computed(() => {
   const query = keyword.value.trim().toLowerCase()
@@ -196,7 +207,15 @@ const searchedFlashcards = computed(() => {
 })
 
 const filteredFlashcards = computed(() => {
-  const cards = searchedFlashcards.value
+  let cards = searchedFlashcards.value
+  if (activePlanWordKeys.value.length) {
+    const activeKeys = new Set(activePlanWordKeys.value)
+    cards = cards.filter(card => activeKeys.has(card.statusKey))
+  }
+
+  if (flashcardCategoryFilter.value !== 'all')
+    cards = cards.filter(card => card.category === flashcardCategoryFilter.value)
+
   if (flashcardReviewOptions.reviewMode === 'all')
     return cards
 
@@ -234,6 +253,9 @@ const flashcardStats = computed(() => {
   const unknown = cards.filter(card => getFlashcardStatus(card.word) === 'unknown').length
   const unmarked = cards.length - known - unknown
   const reviewedToday = cards.filter(card => flashcardReviewedAt[card.statusKey] === today).length
+  const fivePlus = cards.filter(card => getFlashcardMemoryCount(card.word) >= 5).length
+  const tenPlus = cards.filter(card => getFlashcardMemoryCount(card.word) >= 10).length
+  const mastered = cards.filter(card => getFlashcardMemoryCount(card.word) >= 20).length
 
   return {
     total: cards.length,
@@ -241,6 +263,77 @@ const flashcardStats = computed(() => {
     unknown,
     unmarked,
     reviewedToday,
+    fivePlus,
+    tenPlus,
+    mastered,
+  }
+})
+
+const keywordPlan = computed(() => {
+  const totalDays = Math.max(1, Math.min(60, Number(planningDays.value) || 7))
+
+  const categoryPlans = ws.map((cat) => {
+    const targetCount = categoryPlanTargets[cat.title] || 10
+    const outstandingWords = cat.words
+      .map(row => ({
+        index: row[0],
+        word: row[1],
+        memoryCount: getFlashcardMemoryCount(row[1]),
+        remaining: Math.max(targetCount - getFlashcardMemoryCount(row[1]), 0),
+      }))
+      .filter(item => item.remaining > 0)
+
+    const chunks = Array.from({ length: totalDays }, () => [])
+    outstandingWords.forEach((item, idx) => {
+      chunks[idx % totalDays].push(item)
+    })
+
+    return {
+      title: cat.title,
+      require: cat.require,
+      targetCount,
+      totalWords: cat.words.length,
+      outstandingWords,
+      chunks,
+      completed: outstandingWords.length === 0,
+    }
+  })
+
+  const days = Array.from({ length: totalDays }, (_, index) => {
+    const dayNumber = index + 1
+    const tasks = categoryPlans.map((plan) => {
+      const wordsForDay = plan.chunks[index] || []
+      const targetWordCount = wordsForDay.length
+      const remainingHits = wordsForDay.reduce((sum, item) => sum + item.remaining, 0)
+
+      return {
+        title: plan.title,
+        require: plan.require,
+        targetCount: plan.targetCount,
+        wordsForDay,
+        targetWordCount,
+        remainingHits,
+      }
+    })
+
+    const totalWords = tasks.reduce((sum, task) => sum + task.targetWordCount, 0)
+    const totalRemainingHits = tasks.reduce((sum, task) => sum + task.remainingHits, 0)
+
+    return {
+      dayNumber,
+      tasks,
+      totalWords,
+      totalRemainingHits,
+      suggestions: buildPlanSuggestions(dayNumber, totalDays, tasks, totalRemainingHits),
+    }
+  })
+
+  return {
+    totalDays,
+    categoryPlans,
+    days,
+    outstandingWords: categoryPlans.reduce((sum, plan) => sum + plan.outstandingWords.length, 0),
+    totalRemainingHits: categoryPlans.reduce((sum, plan) => sum + plan.outstandingWords.reduce((acc, item) => acc + item.remaining, 0), 0),
   }
 })
 
@@ -318,6 +411,11 @@ function getFlashcardStatus(word) {
   return flashcardStatuses[normalizeWord(word).toLowerCase()] || ''
 }
 
+function getFlashcardMemoryCount(word) {
+  const value = flashcardMemoryCounts[normalizeWord(word).toLowerCase()]
+  return Number.isFinite(value) ? value : 0
+}
+
 function persistFlashcardStatuses() {
   if (typeof window === 'undefined')
     return
@@ -328,6 +426,12 @@ function persistFlashcardReviewedAt() {
   if (typeof window === 'undefined')
     return
   window.localStorage.setItem(FLASHCARD_REVIEWED_AT_STORAGE_KEY, JSON.stringify(flashcardReviewedAt))
+}
+
+function persistFlashcardMemoryCounts() {
+  if (typeof window === 'undefined')
+    return
+  window.localStorage.setItem(FLASHCARD_MEMORY_COUNT_STORAGE_KEY, JSON.stringify(flashcardMemoryCounts))
 }
 
 function loadFlashcardStatuses() {
@@ -364,12 +468,57 @@ function loadFlashcardReviewedAt() {
   }
 }
 
+function loadFlashcardMemoryCounts() {
+  if (typeof window === 'undefined')
+    return
+
+  const raw = window.localStorage.getItem(FLASHCARD_MEMORY_COUNT_STORAGE_KEY)
+  if (!raw)
+    return
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object')
+      Object.assign(flashcardMemoryCounts, parsed)
+  }
+  catch {
+  }
+}
+
 function setKeywordView(view) {
   activeKeywordView.value = view
   flashcardFlipped.value = false
   clearAutoNextTimer()
   if (view !== 'flashcard')
     exitFlashcardFullscreen()
+}
+
+function clearPlanFlashcardFocus() {
+  activePlanLabel.value = ''
+  activePlanWordKeys.value = []
+  flashcardCategoryFilter.value = 'all'
+}
+
+function startPlanFlashcards(day, task = null) {
+  const selectedWords = task
+    ? task.wordsForDay
+    : day.tasks.flatMap(item => item.wordsForDay)
+
+  const keys = selectedWords
+    .map(item => normalizeWord(item.word).toLowerCase())
+    .filter(Boolean)
+
+  activePlanWordKeys.value = [...new Set(keys)]
+  activePlanLabel.value = task
+    ? `第 ${day.dayNumber} 天 · ${task.title}`
+    : `第 ${day.dayNumber} 天全部任务`
+  activeKeywordView.value = 'flashcard'
+  flashcardReviewOptions.reviewMode = 'all'
+  flashcardReviewOptions.shuffle = true
+  flashcardCategoryFilter.value = task ? task.title : 'all'
+  keyword.value = ''
+  flashcardIndex.value = 0
+  flashcardFlipped.value = false
 }
 
 function flipFlashcard() {
@@ -432,8 +581,91 @@ function markFlashcard(status) {
 
   flashcardStatuses[card.statusKey] = status
   flashcardReviewedAt[card.statusKey] = getTodayKey()
+  if (status === 'known') {
+    flashcardMemoryCounts[card.statusKey] = getFlashcardMemoryCount(card.word) + 1
+    persistFlashcardMemoryCounts()
+  }
   persistFlashcardStatuses()
   persistFlashcardReviewedAt()
+}
+
+function getMemoryStageMeta(word, category = '') {
+  const count = getFlashcardMemoryCount(word)
+
+  if (count >= 20) {
+    return {
+      key: 'mastered',
+      label: '烂熟于心',
+      hint: '已达到 20 次以上正确回忆',
+      className: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300',
+    }
+  }
+
+  if (count >= 10) {
+    return {
+      key: 'ten-plus',
+      label: '10+ 次',
+      hint: category.includes('第 1 类') ? '第 1 类还建议继续冲到 20 次以上' : '已达到 10 次以上正确回忆',
+      className: 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300',
+    }
+  }
+
+  if (count >= 5) {
+    return {
+      key: 'five-plus',
+      label: '5+ 次',
+      hint: '已达到 5 次以上正确回忆',
+      className: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300',
+    }
+  }
+
+  return {
+    key: 'warming-up',
+    label: '未达 5 次',
+    hint: '继续记背，先冲到 5 次',
+    className: 'border-gray-200 bg-gray-100 text-gray-600 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300',
+  }
+}
+
+function getCategoryProgressSummary(category) {
+  const counts = category.words.map(row => getFlashcardMemoryCount(row[1]))
+  return {
+    total: counts.length,
+    fivePlus: counts.filter(count => count >= 5).length,
+    tenPlus: counts.filter(count => count >= 10).length,
+    mastered: counts.filter(count => count >= 20).length,
+  }
+}
+
+function formatPlanWordPreview(wordsForDay, max = 6) {
+  if (!wordsForDay.length)
+    return '今天这一类以复习已学内容为主。'
+
+  const preview = wordsForDay.slice(0, max).map(item => `${item.index}.${normalizeWord(item.word)}`).join('、')
+  const extra = wordsForDay.length > max ? ` 等 ${wordsForDay.length} 个词` : ''
+  return `${preview}${extra}`
+}
+
+function buildPlanSuggestions(dayNumber, totalDays, tasks, totalRemainingHits) {
+  const classOneTask = tasks.find(task => task.title.includes('第 1 类'))
+  const classTwoTask = tasks.find(task => task.title.includes('第 2 类'))
+  const classThreeTask = tasks.find(task => task.title.includes('第 3 类'))
+  const introFocus = tasks
+    .filter(task => task.targetWordCount > 0)
+    .map(task => `${task.title} ${task.targetWordCount} 个`)
+    .join('，') || '复习已学单词'
+
+  const intensity = totalRemainingHits >= 80 ? '高强度冲刺日' : totalRemainingHits >= 40 ? '标准推进日' : '巩固收口日'
+
+  return [
+    `${intensity}：今天优先处理 ${introFocus}。如果时间紧，先保第 1 类，再做第 2、3 类新增任务。`,
+    `上午建议先用列表模式过一遍新任务词，尤其是第 1 类；今日第 1 类重点：${formatPlanWordPreview(classOneTask?.wordsForDay || [], 4)}`,
+    `下午切到闪卡模式，优先复习“不认识”和“未达 5 次”的词；第 2 类建议先攻：${formatPlanWordPreview(classTwoTask?.wordsForDay || [], 5)}`,
+    `晚上用练习模式做拼写和同义替换输入；第 3 类建议集中做这些词：${formatPlanWordPreview(classThreeTask?.wordsForDay || [], 5)}`,
+    dayNumber === totalDays
+      ? '最后一天先清空“未达标”和“不认识”，再冲刺第 1 类到“烂熟于心”，第 2、3 类至少保持在 10+ 次。'
+      : '结束前回到闪卡模式，给今天真正答对的词点“我认识”，让次数累计到本地记录里。',
+  ]
 }
 
 function getFullscreenElement() {
@@ -532,6 +764,7 @@ function handleFlashcardKeydown(event) {
 onMounted(() => {
   loadFlashcardStatuses()
   loadFlashcardReviewedAt()
+  loadFlashcardMemoryCounts()
   syncFlashcardFullscreenState()
   window.addEventListener('keydown', handleFlashcardKeydown)
   document.addEventListener('fullscreenchange', syncFlashcardFullscreenState)
@@ -1059,13 +1292,53 @@ async function showWordToast(meta, event) {
           >
             闪卡模式
           </button>
+          <button
+            type="button"
+            class="border rounded-full px-3 py-1 text-xs font-medium transition"
+            :class="activeKeywordView === 'plan'
+              ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+              : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+            @click="setKeywordView('plan')"
+          >
+            规划模式
+          </button>
           <span class="text-xs text-gray-500 dark:text-gray-400">
-            {{ activeKeywordView === 'flashcard' ? '点击卡片翻面记背' : '点击单词可打开记忆词卡' }}
+            {{
+              activeKeywordView === 'flashcard'
+                ? '点击卡片翻面记背'
+                : activeKeywordView === 'plan'
+                  ? '按天拆分学习任务，照着执行即可'
+                  : '点击单词可打开记忆词卡'
+            }}
           </span>
         </div>
 
         <div v-if="activeKeywordView === 'flashcard'" class="mt-6">
-          <div class="grid mb-4 gap-3 lg:grid-cols-5 sm:grid-cols-2">
+          <div
+            v-if="activePlanWordKeys.length"
+            class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm dark:border-sky-500/30 dark:bg-sky-500/10"
+          >
+            <div>
+              <p class="text-xs font-semibold tracking-wide uppercase text-sky-700 dark:text-sky-300">
+                当前任务闪卡
+              </p>
+              <p class="mt-1 font-medium text-gray-900 dark:text-white">
+                {{ activePlanLabel }}
+              </p>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                当前只显示这次计划里安排的单词。
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded-lg border border-sky-200 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 dark:border-sky-500/30 dark:bg-slate-900 dark:text-sky-300 dark:hover:bg-slate-800"
+              @click="clearPlanFlashcardFocus"
+            >
+              查看全部闪卡
+            </button>
+          </div>
+
+          <div class="grid mb-4 gap-3 xl:grid-cols-8 lg:grid-cols-4 sm:grid-cols-2">
             <div class="rounded-xl bg-gray-50 px-4 py-3 text-sm dark:bg-gray-700/50">
               <p class="text-xs tracking-wide uppercase text-gray-500 dark:text-gray-400">
                 总词数
@@ -1106,9 +1379,55 @@ async function showWordToast(meta, event) {
                 {{ flashcardStats.reviewedToday }} / {{ flashcardStats.total }}
               </p>
             </div>
+            <div class="rounded-xl bg-amber-50 px-4 py-3 text-sm dark:bg-amber-500/10">
+              <p class="text-xs tracking-wide uppercase text-amber-700 dark:text-amber-300">
+                5+ 次
+              </p>
+              <p class="mt-1 text-lg font-semibold text-amber-800 dark:text-amber-200">
+                {{ flashcardStats.fivePlus }}
+              </p>
+            </div>
+            <div class="rounded-xl bg-blue-50 px-4 py-3 text-sm dark:bg-blue-500/10">
+              <p class="text-xs tracking-wide uppercase text-blue-700 dark:text-blue-300">
+                10+ 次
+              </p>
+              <p class="mt-1 text-lg font-semibold text-blue-800 dark:text-blue-200">
+                {{ flashcardStats.tenPlus }}
+              </p>
+            </div>
+            <div class="rounded-xl bg-emerald-50 px-4 py-3 text-sm dark:bg-emerald-500/10">
+              <p class="text-xs tracking-wide uppercase text-emerald-700 dark:text-emerald-300">
+                烂熟于心
+              </p>
+              <p class="mt-1 text-lg font-semibold text-emerald-800 dark:text-emerald-200">
+                {{ flashcardStats.mastered }}
+              </p>
+            </div>
           </div>
 
           <div class="mb-4 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="border rounded-full px-3 py-1 text-xs font-medium transition"
+              :class="flashcardCategoryFilter === 'all'
+                ? 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="flashcardCategoryFilter = 'all'"
+            >
+              全部分类
+            </button>
+            <button
+              v-for="category in ws.map(cat => cat.title)"
+              :key="category"
+              type="button"
+              class="border rounded-full px-3 py-1 text-xs font-medium transition"
+              :class="flashcardCategoryFilter === category
+                ? 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="flashcardCategoryFilter = category"
+            >
+              {{ category }}
+            </button>
             <button
               type="button"
               class="border rounded-full px-3 py-1 text-xs font-medium transition"
@@ -1162,6 +1481,12 @@ async function showWordToast(meta, event) {
             <span class="text-xs text-gray-500 dark:text-gray-400">
               快捷键：`Space/Enter` 翻面，`←/→` 切卡，`K` 我认识，`U` 不认识，`R` 随机
             </span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">
+              每次在背面点击“我认识”会为该词累计 1 次正确记忆
+            </span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">
+              当前分类：{{ flashcardCategoryFilter === 'all' ? '全部' : flashcardCategoryFilter }}
+            </span>
           </div>
 
           <div
@@ -1174,6 +1499,16 @@ async function showWordToast(meta, event) {
               <div class="flex items-center gap-3">
                 <span class="rounded-full bg-gray-100 px-3 py-1 dark:bg-gray-700">{{ currentFlashcard.category }}</span>
                 <span>{{ flashcardIndex + 1 }} / {{ flashcardDeck.length }}</span>
+                <span
+                  class="rounded-full border px-3 py-1 font-medium"
+                  :class="getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).className"
+                  :title="getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).hint"
+                >
+                  {{ getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).label }}
+                </span>
+                <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                  已记住 {{ getFlashcardMemoryCount(currentFlashcard.word) }} 次
+                </span>
                 <span
                   class="rounded-full px-3 py-1"
                   :class="getFlashcardStatus(currentFlashcard.word) === 'known'
@@ -1233,6 +1568,17 @@ async function showWordToast(meta, event) {
                 <p class="mb-6 text-3xl font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
                   Flashcard Front
                 </p>
+                <div class="mb-6 flex flex-wrap items-center justify-center gap-3 text-xl">
+                  <span
+                    class="rounded-full border px-4 py-1.5 font-medium"
+                    :class="getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).className"
+                  >
+                    {{ getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).label }}
+                  </span>
+                  <span class="rounded-full bg-slate-100 px-4 py-1.5 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                    已记住 {{ getFlashcardMemoryCount(currentFlashcard.word) }} 次
+                  </span>
+                </div>
                 <h4 class="text-[6.75rem] leading-none font-bold text-gray-900 dark:text-white">
                   {{ currentFlashcard.word }}
                 </h4>
@@ -1256,6 +1602,20 @@ async function showWordToast(meta, event) {
                     <p class="mt-4 text-3xl text-gray-500 dark:text-gray-400">
                       {{ currentFlashcard.type }} · {{ currentFlashcard.meaning }}
                     </p>
+                    <div class="mt-5 flex flex-wrap items-center gap-3 text-xl">
+                      <span
+                        class="rounded-full border px-4 py-1.5 font-medium"
+                        :class="getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).className"
+                      >
+                        {{ getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).label }}
+                      </span>
+                      <span class="rounded-full bg-slate-100 px-4 py-1.5 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                        已记住 {{ getFlashcardMemoryCount(currentFlashcard.word) }} 次
+                      </span>
+                      <span class="text-lg text-gray-500 dark:text-gray-400">
+                        {{ getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).hint }}
+                      </span>
+                    </div>
                   </div>
                   <div class="flex items-center gap-2">
                     <button
@@ -1322,6 +1682,192 @@ async function showWordToast(meta, event) {
           </div>
         </div>
 
+        <div v-else-if="activeKeywordView === 'plan'" class="mt-6 space-y-6">
+          <div class="rounded-2xl border border-sky-200 bg-sky-50 p-5 dark:border-sky-500/30 dark:bg-sky-500/10">
+            <div class="flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <p class="text-xs font-semibold tracking-wide uppercase text-sky-700 dark:text-sky-300">
+                  Study Planner
+                </p>
+                <h4 class="mt-1 text-2xl font-bold text-gray-900 dark:text-white">
+                  阅读 538 考点词学习规划
+                </h4>
+                <p class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+                  按你设定的天数自动拆分第 1/2/3 类任务，并结合当前记忆次数给出每天怎么学。
+                </p>
+              </div>
+              <label class="flex items-center gap-3 text-sm text-gray-700 dark:text-gray-200">
+                <span>计划天数</span>
+                <input
+                  v-model="planningDays"
+                  type="number"
+                  min="1"
+                  max="60"
+                  class="w-24 rounded-lg border border-sky-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-sky-400 dark:border-sky-500/30 dark:bg-slate-900 dark:text-white"
+                >
+              </label>
+            </div>
+
+            <div class="mt-4 grid gap-3 lg:grid-cols-4 sm:grid-cols-2">
+              <div class="rounded-xl bg-white px-4 py-3 text-sm shadow-sm dark:bg-slate-900/70">
+                <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  计划天数
+                </p>
+                <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
+                  {{ keywordPlan.totalDays }} 天
+                </p>
+              </div>
+              <div class="rounded-xl bg-white px-4 py-3 text-sm shadow-sm dark:bg-slate-900/70">
+                <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  未达标词数
+                </p>
+                <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
+                  {{ keywordPlan.outstandingWords }}
+                </p>
+              </div>
+              <div class="rounded-xl bg-white px-4 py-3 text-sm shadow-sm dark:bg-slate-900/70">
+                <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  剩余正确记忆次数
+                </p>
+                <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
+                  {{ keywordPlan.totalRemainingHits }}
+                </p>
+              </div>
+              <div class="rounded-xl bg-white px-4 py-3 text-sm shadow-sm dark:bg-slate-900/70">
+                <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  平均每日要补
+                </p>
+                <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
+                  {{ Math.ceil(keywordPlan.totalRemainingHits / keywordPlan.totalDays) }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid gap-4 lg:grid-cols-3">
+            <div
+              v-for="plan in keywordPlan.categoryPlans"
+              :key="plan.title"
+              class="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-800"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <h5 class="text-lg font-semibold text-gray-900 dark:text-white">
+                    {{ plan.title }}
+                  </h5>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    目标：{{ plan.require }}
+                  </p>
+                </div>
+                <span
+                  class="rounded-full px-3 py-1 text-xs font-medium"
+                  :class="plan.completed
+                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+                    : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'"
+                >
+                  {{ plan.completed ? '已全部达标' : '仍需推进' }}
+                </span>
+              </div>
+              <div class="mt-4 space-y-2 text-sm text-gray-600 dark:text-gray-300">
+                <p>总词数：{{ plan.totalWords }}</p>
+                <p>目标次数：每词 {{ plan.targetCount }} 次</p>
+                <p>未达标词：{{ plan.outstandingWords.length }}</p>
+                <p>
+                  今日起建议优先词：
+                  {{ formatPlanWordPreview(plan.outstandingWords, 5) }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-4">
+            <div
+              v-for="day in keywordPlan.days"
+              :key="day.dayNumber"
+              class="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-800"
+            >
+              <div class="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p class="text-xs font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
+                    Day {{ day.dayNumber }}
+                  </p>
+                  <h5 class="mt-1 text-xl font-bold text-gray-900 dark:text-white">
+                    第 {{ day.dayNumber }} 天学习任务
+                  </h5>
+                  <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                    今日共安排 {{ day.totalWords }} 个重点词，还需补 {{ day.totalRemainingHits }} 次正确记忆。
+                  </p>
+                </div>
+                <div class="flex flex-wrap gap-2 text-xs">
+                  <span class="rounded-full bg-gray-100 px-3 py-1 text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+                    重点词 {{ day.totalWords }}
+                  </span>
+                  <span class="rounded-full bg-blue-50 px-3 py-1 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">
+                    记忆补点 {{ day.totalRemainingHits }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="mt-4 grid gap-4 lg:grid-cols-3">
+                <div
+                  v-for="task in day.tasks"
+                  :key="`${day.dayNumber}-${task.title}`"
+                  class="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/40"
+                >
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <h6 class="font-semibold text-gray-900 dark:text-white">
+                        {{ task.title }}
+                      </h6>
+                      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        {{ task.require }}
+                      </p>
+                    </div>
+                    <span class="rounded-full bg-white px-2.5 py-1 text-xs text-gray-600 dark:bg-gray-800 dark:text-gray-300">
+                      {{ task.targetWordCount }} 词
+                    </span>
+                  </div>
+                  <div class="mt-3 space-y-2 text-sm text-gray-600 dark:text-gray-300">
+                    <p>今日新/重点：{{ task.targetWordCount }} 个</p>
+                    <p>待补次数：{{ task.remainingHits }}</p>
+                    <p>建议词：{{ formatPlanWordPreview(task.wordsForDay, 5) }}</p>
+                  </div>
+                  <button
+                    type="button"
+                    class="mt-4 w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300 dark:disabled:bg-gray-700"
+                    :disabled="!task.targetWordCount"
+                    @click="startPlanFlashcards(day, task)"
+                  >
+                    {{ task.targetWordCount ? '学习这类任务闪卡' : '今天该类无新增任务' }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="mt-5 rounded-xl bg-slate-50 px-4 py-4 dark:bg-slate-900/60">
+                <p class="text-sm font-semibold text-gray-900 dark:text-white">
+                  当天具体学习建议
+                </p>
+                <ul class="mt-3 ml-5 list-disc space-y-2 text-sm text-gray-600 dark:text-gray-300">
+                  <li v-for="tip in day.suggestions" :key="tip">
+                    {{ tip }}
+                  </li>
+                </ul>
+              </div>
+
+              <div class="mt-4 flex flex-wrap justify-end gap-3">
+                <button
+                  type="button"
+                  class="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 dark:disabled:bg-gray-900 dark:disabled:text-gray-500"
+                  :disabled="!day.totalWords"
+                  @click="startPlanFlashcards(day)"
+                >
+                  {{ day.totalWords ? '学习当天全部任务闪卡' : '今天以复习已学内容为主' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <template v-else>
           <template v-for="cat in filteredCategories" :key="cat.title">
             <div class="mt-6 items-center justify-between lg:flex">
@@ -1342,6 +1888,23 @@ async function showWordToast(meta, event) {
               </div>
             </div>
             <div class="mt-6">
+              <div class="mb-4 flex flex-wrap items-center gap-2 text-xs">
+                <span class="rounded-full bg-gray-100 px-3 py-1 text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+                  总词数 {{ getCategoryProgressSummary(cat).total }}
+                </span>
+                <span class="rounded-full bg-amber-50 px-3 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                  5+ 次 {{ getCategoryProgressSummary(cat).fivePlus }}
+                </span>
+                <span class="rounded-full bg-blue-50 px-3 py-1 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">
+                  10+ 次 {{ getCategoryProgressSummary(cat).tenPlus }}
+                </span>
+                <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+                  烂熟于心 {{ getCategoryProgressSummary(cat).mastered }}
+                </span>
+                <span class="text-gray-500 dark:text-gray-400">
+                  {{ cat.require }}
+                </span>
+              </div>
               <div class="mb-3 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -1439,6 +2002,9 @@ async function showWordToast(meta, event) {
                         </button>
                       </div>
                     </th>
+                    <th scope="col" class="w-56 px-6 py-3">
+                      记忆进度
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1511,6 +2077,23 @@ async function showWordToast(meta, event) {
                         {{ w[5].length > 0 ? w[5] : '' }}
                       </template>
                       <span v-else class="text-gray-400 dark:text-gray-500">已隐藏，请先回忆同义替换</span>
+                    </td>
+                    <td class="px-6 py-4">
+                      <div class="flex flex-col items-start gap-2">
+                        <span
+                          class="rounded-full border px-3 py-1 text-xs font-medium"
+                          :class="getMemoryStageMeta(w[1], cat.title).className"
+                          :title="getMemoryStageMeta(w[1], cat.title).hint"
+                        >
+                          {{ getMemoryStageMeta(w[1], cat.title).label }}
+                        </span>
+                        <span class="text-sm font-medium text-gray-700 dark:text-gray-200">
+                          已记住 {{ getFlashcardMemoryCount(w[1]) }} 次
+                        </span>
+                        <span class="text-xs text-gray-500 dark:text-gray-400">
+                          {{ getMemoryStageMeta(w[1], cat.title).hint }}
+                        </span>
+                      </div>
                     </td>
                   </tr>
                 </tbody>

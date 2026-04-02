@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import vocabulary from './vocabulary'
+import baseChapterMap from './chapter-map'
 import listeningWords from '../listening/listening179.json'
 import keywordMarkdown from '../reading/538keyword.md?raw'
 import readingWords from '../reading/reading538words'
@@ -81,7 +81,7 @@ const listeningTypingChapter = {
 }
 
 const chapterMap = {
-  ...(vocabulary as any),
+  ...(baseChapterMap as any),
   ...listeningTypingChapter,
   ...readingTypingChapters,
 }
@@ -153,6 +153,8 @@ function playAudio() {
     audio.src = `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(word)}&type=1`
   else if (chapter?.source === 'listening')
     audio.src = `/179_audios/${word}.mp3`
+  else if (chapter?.source === 'base3000')
+    audio.src = `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(word)}&type=1`
   else
     audio.src = `vocabulary/audio/${category}/${word}.mp3`
   audio.play()
