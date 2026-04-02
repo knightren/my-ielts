@@ -23,6 +23,8 @@ const flashcardReviewOptions = reactive({
 const flashcardStatuses = reactive({})
 const flashcardReviewedAt = reactive({})
 const flashcardOrder = ref([])
+const flashcardFullscreenEl = ref(null)
+const isFlashcardFullscreen = ref(false)
 const FLASHCARD_STATUS_STORAGE_KEY = 'reading-538-flashcard-statuses'
 const FLASHCARD_REVIEWED_AT_STORAGE_KEY = 'reading-538-flashcard-reviewed-at'
 let autoNextTimer = null
@@ -366,6 +368,8 @@ function setKeywordView(view) {
   activeKeywordView.value = view
   flashcardFlipped.value = false
   clearAutoNextTimer()
+  if (view !== 'flashcard')
+    exitFlashcardFullscreen()
 }
 
 function flipFlashcard() {
@@ -432,6 +436,49 @@ function markFlashcard(status) {
   persistFlashcardReviewedAt()
 }
 
+function getFullscreenElement() {
+  if (typeof document === 'undefined')
+    return null
+
+  return document.fullscreenElement || document.webkitFullscreenElement || null
+}
+
+function syncFlashcardFullscreenState() {
+  isFlashcardFullscreen.value = getFullscreenElement() === flashcardFullscreenEl.value
+}
+
+async function requestFlashcardFullscreen(element) {
+  if (element?.requestFullscreen)
+    await element.requestFullscreen()
+  else if (element?.webkitRequestFullscreen)
+    await element.webkitRequestFullscreen()
+}
+
+async function exitFlashcardFullscreen() {
+  if (typeof document === 'undefined' || getFullscreenElement() !== flashcardFullscreenEl.value)
+    return
+
+  if (document.exitFullscreen)
+    await document.exitFullscreen()
+  else if (document.webkitExitFullscreen)
+    await document.webkitExitFullscreen()
+}
+
+async function toggleFlashcardFullscreen() {
+  const element = flashcardFullscreenEl.value
+  if (!element || typeof document === 'undefined')
+    return
+
+  try {
+    if (getFullscreenElement() === element)
+      await exitFlashcardFullscreen()
+    else
+      await requestFlashcardFullscreen(element)
+  }
+  catch {
+  }
+}
+
 function isTypingTarget(target) {
   if (!(target instanceof HTMLElement))
     return false
@@ -485,12 +532,17 @@ function handleFlashcardKeydown(event) {
 onMounted(() => {
   loadFlashcardStatuses()
   loadFlashcardReviewedAt()
+  syncFlashcardFullscreenState()
   window.addEventListener('keydown', handleFlashcardKeydown)
+  document.addEventListener('fullscreenchange', syncFlashcardFullscreenState)
+  document.addEventListener('webkitfullscreenchange', syncFlashcardFullscreenState)
 })
 
 onBeforeUnmount(() => {
   clearAutoNextTimer()
   window.removeEventListener('keydown', handleFlashcardKeydown)
+  document.removeEventListener('fullscreenchange', syncFlashcardFullscreenState)
+  document.removeEventListener('webkitfullscreenchange', syncFlashcardFullscreenState)
 })
 
 function createExampleMap(markdown) {
@@ -1108,8 +1160,13 @@ async function showWordToast(meta, event) {
             </span>
           </div>
 
-          <div v-if="currentFlashcard" class="mx-auto max-w-3xl">
-            <div class="mb-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-500 dark:text-gray-400">
+          <div
+            v-if="currentFlashcard"
+            ref="flashcardFullscreenEl"
+            class="mx-auto max-w-3xl"
+            :class="isFlashcardFullscreen ? 'max-w-none h-full w-full flex flex-col justify-center bg-gray-950 px-4 py-6 sm:px-8' : ''"
+          >
+            <div class="mb-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-500 dark:text-gray-400" :class="isFlashcardFullscreen ? 'text-gray-300' : ''">
               <div class="flex items-center gap-3">
                 <span class="rounded-full bg-gray-100 px-3 py-1 dark:bg-gray-700">{{ currentFlashcard.category }}</span>
                 <span>{{ flashcardIndex + 1 }} / {{ flashcardDeck.length }}</span>
@@ -1131,6 +1188,13 @@ async function showWordToast(meta, event) {
                 </span>
               </div>
               <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                  @click="toggleFlashcardFullscreen"
+                >
+                  {{ isFlashcardFullscreen ? '退出全屏' : '全屏' }}
+                </button>
                 <button
                   type="button"
                   class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
@@ -1157,20 +1221,21 @@ async function showWordToast(meta, event) {
 
             <button
               type="button"
-              class="w-full border border-gray-200 rounded-2xl bg-white p-8 text-left shadow-sm transition dark:border-gray-700 hover:border-blue-300 dark:bg-gray-800 hover:shadow-md dark:hover:border-blue-500/40"
+              class="w-full border border-sky-200 rounded-2xl bg-gradient-to-br from-sky-50 via-blue-50 to-cyan-100 p-8 text-left shadow-sm transition hover:border-blue-300 hover:shadow-md dark:border-sky-700/60 dark:from-slate-800 dark:via-sky-900/40 dark:to-slate-900 dark:hover:border-blue-500/40"
+              :class="isFlashcardFullscreen ? 'min-h-[calc(100vh-9rem)] border-sky-300 from-sky-100 via-blue-50 to-cyan-100 dark:border-sky-700 dark:from-slate-900 dark:via-sky-950/70 dark:to-slate-950' : ''"
               @click="flipFlashcard"
             >
               <div v-if="!flashcardFlipped" class="min-h-[320px] flex flex-col items-center justify-center text-center">
-                <p class="mb-3 text-xs font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
+                <p class="mb-6 text-3xl font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
                   Flashcard Front
                 </p>
-                <h4 class="text-4xl font-bold text-gray-900 dark:text-white">
+                <h4 class="text-[6.75rem] leading-none font-bold text-gray-900 dark:text-white">
                   {{ currentFlashcard.word }}
                 </h4>
-                <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
+                <p class="mt-6 text-3xl text-gray-500 dark:text-gray-400">
                   {{ currentFlashcard.type }}
                 </p>
-                <p class="mt-6 text-sm text-gray-400 dark:text-gray-500">
+                <p class="mt-10 text-3xl text-gray-400 dark:text-gray-500">
                   点击卡片翻面，回忆中文词义、同义替换和例句
                 </p>
               </div>
@@ -1178,40 +1243,40 @@ async function showWordToast(meta, event) {
               <div v-else class="min-h-[320px]">
                 <div class="flex items-start justify-between gap-4">
                   <div>
-                    <p class="text-xs font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
+                    <p class="text-3xl font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
                       Flashcard Back
                     </p>
-                    <h4 class="mt-1 text-2xl font-bold text-gray-900 dark:text-white">
+                    <h4 class="mt-3 text-7xl leading-none font-bold text-gray-900 dark:text-white">
                       {{ currentFlashcard.word }}
                     </h4>
-                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    <p class="mt-4 text-3xl text-gray-500 dark:text-gray-400">
                       {{ currentFlashcard.type }} · {{ currentFlashcard.meaning }}
                     </p>
                   </div>
                   <div class="flex items-center gap-2">
                     <button
                       type="button"
-                      class="border border-emerald-200 rounded-lg px-3 py-1.5 text-xs text-emerald-700 dark:border-emerald-500/30 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-500/10"
+                      class="border border-emerald-200 rounded-lg px-5 py-3 text-2xl text-emerald-700 dark:border-emerald-500/30 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-500/10"
                       @click.stop="markFlashcard('known')"
                     >
                       我认识
                     </button>
                     <button
                       type="button"
-                      class="border border-amber-200 rounded-lg px-3 py-1.5 text-xs text-amber-700 dark:border-amber-500/30 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-500/10"
+                      class="border border-amber-200 rounded-lg px-5 py-3 text-2xl text-amber-700 dark:border-amber-500/30 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-500/10"
                       @click.stop="markFlashcard('unknown')"
                     >
                       不认识
                     </button>
                     <button
                       type="button"
-                      class="i-carbon-volume-up-filled text-lg text-gray-500 dark:text-gray-400 hover:text-blue-600"
+                      class="i-carbon-volume-up-filled text-5xl text-gray-500 dark:text-gray-400 hover:text-blue-600"
                       :title="`播放 ${currentFlashcard.word} 发音`"
                       @click.stop="play(currentFlashcard.word)"
                     />
                     <button
                       type="button"
-                      class="border border-gray-200 rounded-lg px-3 py-1.5 text-xs dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                      class="border border-gray-200 rounded-lg px-5 py-3 text-2xl dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
                       @click.stop="showWordToast(currentFlashcard, $event)"
                     >
                       完整词卡
@@ -1219,28 +1284,28 @@ async function showWordToast(meta, event) {
                   </div>
                 </div>
 
-                <div class="mt-5 text-sm text-gray-700 space-y-4 dark:text-gray-200">
+                <div class="mt-8 space-y-7 text-3xl text-gray-700 dark:text-gray-200">
                   <div>
-                    <p class="text-xs font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
+                    <p class="text-2xl font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
                       同义替换
                     </p>
-                    <p class="mt-1 leading-6">
+                    <p class="mt-3 leading-[1.5]">
                       {{ currentFlashcard.synonyms.length ? currentFlashcard.synonyms.join(', ') : '暂无' }}
                     </p>
                   </div>
                   <div>
-                    <p class="text-xs font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
+                    <p class="text-2xl font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
                       雅思例句
                     </p>
-                    <p class="mt-1 leading-6">
+                    <p class="mt-3 leading-[1.5]">
                       {{ currentFlashcard.example || '暂未找到例句。' }}
                     </p>
                   </div>
-                  <div class="rounded-xl bg-blue-50 px-3 py-3 dark:bg-blue-500/10">
-                    <p class="text-xs font-medium tracking-wide uppercase text-blue-700 dark:text-blue-300">
+                  <div class="rounded-xl bg-blue-50 px-5 py-5 dark:bg-blue-500/10">
+                    <p class="text-2xl font-medium tracking-wide uppercase text-blue-700 dark:text-blue-300">
                       助记提示
                     </p>
-                    <p class="mt-1 leading-6 text-blue-900 dark:text-blue-100">
+                    <p class="mt-3 leading-[1.5] text-blue-900 dark:text-blue-100">
                       {{ buildMemoryHint(currentFlashcard) }}
                     </p>
                   </div>
