@@ -18,6 +18,8 @@ const activeView = ref(localStorage.getItem(VOCABULARY_VIEW_KEY) || 'list')
 const planningDays = ref(7)
 const flashcardIndex = ref(0)
 const flashcardFlipped = ref(false)
+/** 正面：回忆自评，翻面核对前必选 */
+const flashcardPretest = ref(null)
 const activePlanLabel = ref('')
 const activePlanWordKeys = ref([])
 const flashcardOrder = ref([])
@@ -29,6 +31,8 @@ const flashcardReviewOptions = reactive({
 const flashcardStatuses = reactive({})
 const flashcardReviewedAt = reactive({})
 const flashcardMemoryCounts = reactive({})
+const flashcardFullscreenEl = ref(null)
+const isFlashcardFullscreen = ref(false)
 let autoNextTimer = null
 
 const trainingStats = ref('')
@@ -76,6 +80,7 @@ watch(category, (newVal, oldVal) => {
   activePlanWordKeys.value = []
   flashcardIndex.value = 0
   flashcardFlipped.value = false
+  flashcardPretest.value = null
   flashcardReviewOptions.reviewMode = 'all'
   clearAutoNextTimer()
 })
@@ -83,6 +88,10 @@ watch(category, (newVal, oldVal) => {
 watch(activeView, (value) => {
   localStorage.setItem(VOCABULARY_VIEW_KEY, value)
   flashcardFlipped.value = false
+  flashcardPretest.value = null
+  clearAutoNextTimer()
+  if (value !== 'flashcard')
+    exitFlashcardFullscreen()
 })
 
 const flashcards = computed(() => {
@@ -189,6 +198,7 @@ watch([filteredFlashcards, () => flashcardReviewOptions.shuffle], ([cards]) => {
   if (!cards.length) {
     flashcardIndex.value = 0
     flashcardFlipped.value = false
+    flashcardPretest.value = null
     flashcardOrder.value = []
     return
   }
@@ -278,10 +288,11 @@ function loadFlashcardState() {
   }
 }
 
-function getMemoryStageMeta(statusKey) {
+function getMemoryStageMeta(statusKey, _chapterLabel = '') {
   const count = getFlashcardMemoryCount(statusKey)
   if (count >= 20) {
     return {
+      key: 'mastered',
       label: '烂熟于心',
       hint: '已达到 20 次以上正确回忆',
       className: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300',
@@ -289,6 +300,7 @@ function getMemoryStageMeta(statusKey) {
   }
   if (count >= 10) {
     return {
+      key: 'ten-plus',
       label: '10+ 次',
       hint: '已达到 10 次以上正确回忆',
       className: 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300',
@@ -296,12 +308,14 @@ function getMemoryStageMeta(statusKey) {
   }
   if (count >= 5) {
     return {
+      key: 'five-plus',
       label: '5+ 次',
       hint: '已达到 5 次以上正确回忆',
       className: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300',
     }
   }
   return {
+    key: 'warming-up',
     label: '未达 5 次',
     hint: '继续记背，先冲到 5 次',
     className: 'border-gray-200 bg-gray-100 text-gray-600 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300',
@@ -312,20 +326,54 @@ function moveFlashcard(step) {
   const cards = flashcardDeck.value
   if (!cards.length)
     return
+  clearAutoNextTimer()
   flashcardIndex.value = (flashcardIndex.value + step + cards.length) % cards.length
   flashcardFlipped.value = false
+  flashcardPretest.value = null
+}
+
+function randomFlashcard() {
+  const cards = flashcardDeck.value
+  if (cards.length < 2)
+    return
+
+  let nextIndex = flashcardIndex.value
+  while (nextIndex === flashcardIndex.value)
+    nextIndex = Math.floor(Math.random() * cards.length)
+
+  clearAutoNextTimer()
+  flashcardIndex.value = nextIndex
+  flashcardFlipped.value = false
+  flashcardPretest.value = null
+}
+
+function selectFlashcardPretestAndFlip(pretest) {
+  if (!currentFlashcard.value || flashcardFlipped.value)
+    return
+  flashcardPretest.value = pretest
+  flashcardFlipped.value = true
+  clearAutoNextTimer()
+  if (pretest === 'unknown') {
+    markFlashcard('unknown')
+    if (flashcardReviewOptions.autoNextAfterFlip)
+      scheduleAutoNext()
+    else
+      clearAutoNextTimer()
+  }
+}
+
+/** 仅背面 → 正面（正面翻面完全由选认识/不认识或 K/U 触发） */
+function flipFlashcard() {
+  if (!currentFlashcard.value || !flashcardFlipped.value)
+    return
+  flashcardFlipped.value = false
+  flashcardPretest.value = null
   clearAutoNextTimer()
 }
 
-function flipFlashcard() {
-  if (!currentFlashcard.value)
-    return
-  flashcardFlipped.value = !flashcardFlipped.value
-
-  if (flashcardFlipped.value && flashcardReviewOptions.autoNextAfterFlip)
-    scheduleAutoNext()
-  else
-    clearAutoNextTimer()
+function onFlashcardShellClick() {
+  if (flashcardFlipped.value)
+    flipFlashcard()
 }
 
 function markFlashcard(status) {
@@ -337,6 +385,35 @@ function markFlashcard(status) {
   if (status === 'known')
     flashcardMemoryCounts[card.statusKey] = getFlashcardMemoryCount(card.statusKey) + 1
   persistFlashcardState()
+}
+
+/** 背面：仅「正面认识」时需核对；对=我认识并累计次数，错=不认识 */
+function confirmFlashcardBack(isCorrect) {
+  if (!currentFlashcard.value || !flashcardFlipped.value || flashcardPretest.value !== 'known')
+    return
+  if (isCorrect)
+    markFlashcard('known')
+  else
+    markFlashcard('unknown')
+  if (flashcardReviewOptions.autoNextAfterFlip)
+    scheduleAutoNext()
+  else
+    clearAutoNextTimer()
+}
+
+function clearAllVocabularyFlashcardProgress() {
+  if (!confirm('确定清除全部词汇闪卡的学习记录？所有章节的「认识/不认识」标记与记忆次数将清空，且无法恢复。'))
+    return
+  for (const k of Object.keys(flashcardStatuses))
+    delete flashcardStatuses[k]
+  for (const k of Object.keys(flashcardReviewedAt))
+    delete flashcardReviewedAt[k]
+  for (const k of Object.keys(flashcardMemoryCounts))
+    delete flashcardMemoryCounts[k]
+  persistFlashcardState()
+  flashcardFlipped.value = false
+  flashcardPretest.value = null
+  clearAutoNextTimer()
 }
 
 function clearAutoNextTimer() {
@@ -357,6 +434,7 @@ function scheduleAutoNext() {
 function setReviewMode(mode) {
   flashcardReviewOptions.reviewMode = mode
   flashcardFlipped.value = false
+  flashcardPretest.value = null
   clearAutoNextTimer()
 }
 
@@ -370,7 +448,7 @@ function formatPlanWordPreview(words, max = 6) {
 function buildChapterPlanSuggestions(dayNumber, totalDays, words) {
   return [
     `上午先用列表模式过一遍这些词：${formatPlanWordPreview(words, 5)}`,
-    '中午或下午切到闪卡模式，先看词再回忆中文义，答对后点“我认识”累计次数。',
+    '中午或下午切到闪卡模式，先看词再回忆中文义，翻面核对后点「对」累计次数。',
     '晚上用打字练习再过一轮，优先处理白天仍然犹豫的词。',
     dayNumber === totalDays
       ? '最后一天重点清空“未达 10 次”的词，并把最核心的基础词尽量冲到“烂熟于心”。'
@@ -386,6 +464,7 @@ function startPlanFlashcards(day) {
   flashcardReviewOptions.shuffle = true
   flashcardIndex.value = 0
   flashcardFlipped.value = false
+  flashcardPretest.value = null
 }
 
 function clearPlanFlashcards() {
@@ -394,9 +473,115 @@ function clearPlanFlashcards() {
   flashcardReviewOptions.reviewMode = 'all'
 }
 
+function getFullscreenElement() {
+  if (typeof document === 'undefined')
+    return null
+
+  return document.fullscreenElement || document.webkitFullscreenElement || null
+}
+
+function syncFlashcardFullscreenState() {
+  isFlashcardFullscreen.value = getFullscreenElement() === flashcardFullscreenEl.value
+}
+
+async function requestFlashcardFullscreen(element) {
+  if (element?.requestFullscreen)
+    await element.requestFullscreen()
+  else if (element?.webkitRequestFullscreen)
+    await element.webkitRequestFullscreen()
+}
+
+async function exitFlashcardFullscreen() {
+  if (typeof document === 'undefined' || getFullscreenElement() !== flashcardFullscreenEl.value)
+    return
+
+  if (document.exitFullscreen)
+    await document.exitFullscreen()
+  else if (document.webkitExitFullscreen)
+    await document.webkitExitFullscreen()
+}
+
+async function toggleFlashcardFullscreen() {
+  const element = flashcardFullscreenEl.value
+  if (!element || typeof document === 'undefined')
+    return
+
+  try {
+    if (getFullscreenElement() === element)
+      await exitFlashcardFullscreen()
+    else
+      await requestFlashcardFullscreen(element)
+  }
+  catch {
+  }
+}
+
+function isTypingTarget(target) {
+  if (!(target instanceof HTMLElement))
+    return false
+
+  const tagName = target.tagName.toLowerCase()
+  return tagName === 'input' || tagName === 'textarea' || tagName === 'select' || target.isContentEditable
+}
+
+function handleVocabularyFlashcardKeydown(event) {
+  if (activeView.value !== 'flashcard')
+    return false
+  if (isTypingTarget(event.target))
+    return false
+
+  if (event.key === ' ' || event.key === 'Enter') {
+    event.preventDefault()
+    if (flashcardFlipped.value)
+      flipFlashcard()
+    return true
+  }
+
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault()
+    moveFlashcard(-1)
+    return true
+  }
+
+  if (event.key === 'ArrowRight') {
+    event.preventDefault()
+    moveFlashcard(1)
+    return true
+  }
+
+  if (event.key.toLowerCase() === 'k') {
+    event.preventDefault()
+    if (!flashcardFlipped.value)
+      selectFlashcardPretestAndFlip('known')
+    else if (flashcardPretest.value === 'known')
+      confirmFlashcardBack(true)
+    return true
+  }
+
+  if (event.key.toLowerCase() === 'u') {
+    event.preventDefault()
+    if (!flashcardFlipped.value)
+      selectFlashcardPretestAndFlip('unknown')
+    else if (flashcardPretest.value === 'known')
+      confirmFlashcardBack(false)
+    return true
+  }
+
+  if (event.key.toLowerCase() === 'r') {
+    event.preventDefault()
+    randomFlashcard()
+    return true
+  }
+
+  return false
+}
+
 onMounted(() => {
   loaded.value = true
   loadFlashcardState()
+  syncFlashcardFullscreenState()
+  document.addEventListener('fullscreenchange', syncFlashcardFullscreenState)
+  document.addEventListener('webkitfullscreenchange', syncFlashcardFullscreenState)
 
   // 只能同时播放一个音频
   const audioTags = document.getElementsByTagName('audio')
@@ -411,6 +596,12 @@ onMounted(() => {
   }
 })
 
+onBeforeUnmount(() => {
+  clearAutoNextTimer()
+  document.removeEventListener('fullscreenchange', syncFlashcardFullscreenState)
+  document.removeEventListener('webkitfullscreenchange', syncFlashcardFullscreenState)
+})
+
 onUpdated(() => {
   // 音频再切换 SRC 之后需要调用一下 load() 不然看不到效果
   for (const el of document.getElementsByTagName('audio'))
@@ -418,6 +609,9 @@ onUpdated(() => {
 })
 
 document.addEventListener('keydown', (ev) => {
+  if (handleVocabularyFlashcardKeydown(ev))
+    return
+
   // 激活的那个音频可以通过方向键进行快进/退
   if (['ArrowLeft', 'ArrowRight', ' '].includes(ev.key)) {
     ev.preventDefault()
@@ -631,6 +825,13 @@ function copyAllError() {
               />
               <span class="ms-3 text-sm font-medium text-gray-900 dark:text-gray-300">自动播放</span>
             </label>
+            <span v-if="activeView === 'flashcard' || activeView === 'plan'" class="ml-2 text-xs text-gray-500 dark:text-gray-400">
+              {{
+                activeView === 'flashcard'
+                  ? '点击橙色闪卡按钮后可进入强化记忆模式'
+                  : '按天拆分学习任务，照着执行即可'
+              }}
+            </span>
           </div>
         </div>
       </div>
@@ -644,6 +845,9 @@ function copyAllError() {
           </p>
           <p class="mt-1 font-medium text-gray-900 dark:text-white">
             {{ activePlanLabel }}
+          </p>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            当前只显示这次计划里安排的单词。
           </p>
         </div>
         <button
@@ -772,34 +976,70 @@ function copyAllError() {
         </div>
       </div>
       <div v-else-if="activeView === 'flashcard'" class="mt-6">
-        <div class="grid mb-4 gap-3 xl:grid-cols-7 lg:grid-cols-4 sm:grid-cols-2">
+        <div class="grid mb-4 gap-3 xl:grid-cols-8 lg:grid-cols-4 sm:grid-cols-2">
           <div class="rounded-xl bg-gray-50 px-4 py-3 text-sm dark:bg-gray-700/50">
-            <p class="text-xs tracking-wide uppercase text-gray-500 dark:text-gray-400">总词数</p>
-            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">{{ flashcardStats.total }}</p>
+            <p class="text-xs tracking-wide uppercase text-gray-500 dark:text-gray-400">
+              总词数
+            </p>
+            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
+              {{ flashcardStats.total }}
+            </p>
           </div>
           <div class="rounded-xl bg-emerald-50 px-4 py-3 text-sm dark:bg-emerald-500/10">
-            <p class="text-xs tracking-wide uppercase text-emerald-700 dark:text-emerald-300">我认识</p>
-            <p class="mt-1 text-lg font-semibold text-emerald-800 dark:text-emerald-200">{{ flashcardStats.known }}</p>
+            <p class="text-xs tracking-wide uppercase text-emerald-700 dark:text-emerald-300">
+              我认识
+            </p>
+            <p class="mt-1 text-lg font-semibold text-emerald-800 dark:text-emerald-200">
+              {{ flashcardStats.known }}
+            </p>
           </div>
           <div class="rounded-xl bg-amber-50 px-4 py-3 text-sm dark:bg-amber-500/10">
-            <p class="text-xs tracking-wide uppercase text-amber-700 dark:text-amber-300">不认识</p>
-            <p class="mt-1 text-lg font-semibold text-amber-800 dark:text-amber-200">{{ flashcardStats.unknown }}</p>
-          </div>
-          <div class="rounded-xl bg-purple-50 px-4 py-3 text-sm dark:bg-purple-500/10">
-            <p class="text-xs tracking-wide uppercase text-purple-700 dark:text-purple-300">今日复习</p>
-            <p class="mt-1 text-lg font-semibold text-purple-800 dark:text-purple-200">{{ flashcardStats.reviewedToday }}</p>
-          </div>
-          <div class="rounded-xl bg-amber-50 px-4 py-3 text-sm dark:bg-amber-500/10">
-            <p class="text-xs tracking-wide uppercase text-amber-700 dark:text-amber-300">5+ 次</p>
-            <p class="mt-1 text-lg font-semibold text-amber-800 dark:text-amber-200">{{ flashcardStats.fivePlus }}</p>
+            <p class="text-xs tracking-wide uppercase text-amber-700 dark:text-amber-300">
+              不认识
+            </p>
+            <p class="mt-1 text-lg font-semibold text-amber-800 dark:text-amber-200">
+              {{ flashcardStats.unknown }}
+            </p>
           </div>
           <div class="rounded-xl bg-blue-50 px-4 py-3 text-sm dark:bg-blue-500/10">
-            <p class="text-xs tracking-wide uppercase text-blue-700 dark:text-blue-300">10+ 次</p>
-            <p class="mt-1 text-lg font-semibold text-blue-800 dark:text-blue-200">{{ flashcardStats.tenPlus }}</p>
+            <p class="text-xs tracking-wide uppercase text-blue-700 dark:text-blue-300">
+              未标记
+            </p>
+            <p class="mt-1 text-lg font-semibold text-blue-800 dark:text-blue-200">
+              {{ flashcardStats.unmarked }}
+            </p>
+          </div>
+          <div class="rounded-xl bg-purple-50 px-4 py-3 text-sm dark:bg-purple-500/10">
+            <p class="text-xs tracking-wide uppercase text-purple-700 dark:text-purple-300">
+              今日复习进度
+            </p>
+            <p class="mt-1 text-lg font-semibold text-purple-800 dark:text-purple-200">
+              {{ flashcardStats.reviewedToday }} / {{ flashcardStats.total }}
+            </p>
+          </div>
+          <div class="rounded-xl bg-amber-50 px-4 py-3 text-sm dark:bg-amber-500/10">
+            <p class="text-xs tracking-wide uppercase text-amber-700 dark:text-amber-300">
+              5+ 次
+            </p>
+            <p class="mt-1 text-lg font-semibold text-amber-800 dark:text-amber-200">
+              {{ flashcardStats.fivePlus }}
+            </p>
+          </div>
+          <div class="rounded-xl bg-blue-50 px-4 py-3 text-sm dark:bg-blue-500/10">
+            <p class="text-xs tracking-wide uppercase text-blue-700 dark:text-blue-300">
+              10+ 次
+            </p>
+            <p class="mt-1 text-lg font-semibold text-blue-800 dark:text-blue-200">
+              {{ flashcardStats.tenPlus }}
+            </p>
           </div>
           <div class="rounded-xl bg-emerald-50 px-4 py-3 text-sm dark:bg-emerald-500/10">
-            <p class="text-xs tracking-wide uppercase text-emerald-700 dark:text-emerald-300">烂熟于心</p>
-            <p class="mt-1 text-lg font-semibold text-emerald-800 dark:text-emerald-200">{{ flashcardStats.mastered }}</p>
+            <p class="text-xs tracking-wide uppercase text-emerald-700 dark:text-emerald-300">
+              烂熟于心
+            </p>
+            <p class="mt-1 text-lg font-semibold text-emerald-800 dark:text-emerald-200">
+              {{ flashcardStats.mastered }}
+            </p>
           </div>
         </div>
 
@@ -852,64 +1092,236 @@ function copyAllError() {
               : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
             @click="flashcardReviewOptions.autoNextAfterFlip = !flashcardReviewOptions.autoNextAfterFlip"
           >
-            {{ flashcardReviewOptions.autoNextAfterFlip ? '翻卡后自动下一张中' : '翻卡后自动下一张' }}
+            {{ flashcardReviewOptions.autoNextAfterFlip ? '确认后自动下一张中' : '确认后自动下一张' }}
+          </button>
+          <button
+            type="button"
+            class="border rounded-full border-red-200 bg-red-50 px-3 py-1 text-xs font-medium text-red-700 transition dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300"
+            @click="clearAllVocabularyFlashcardProgress"
+          >
+            清除闪卡学习记录
           </button>
           <span class="text-xs text-gray-500 dark:text-gray-400">
-            基础词汇也支持按状态筛选、打乱和自动过卡了
+            `U`=不认识并翻面且已自动记入不认识；正面 `K`=认识翻面后背面 `K`/`U` 选对错；`Space`/`Enter` 仅背面翻回正面；`←/→` 切卡，`R` 随机
+          </span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">
+            正面选「不认识」翻面即记入不认识；选「认识」后点「错」也会标记为不认识，可用「只复习不认识」筛选
+          </span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">
+            当前词库：{{ category }}
           </span>
         </div>
 
         <div
           v-if="currentFlashcard"
-          class="mx-auto max-w-4xl cursor-pointer rounded-3xl border border-sky-100 bg-gradient-to-br from-white via-sky-50 to-blue-50 p-6 shadow-lg dark:border-sky-700/40 dark:from-slate-900 dark:via-sky-950/50 dark:to-slate-950"
-          @click="flipFlashcard"
+          ref="flashcardFullscreenEl"
+          class="mx-auto max-w-3xl"
+          :class="isFlashcardFullscreen ? 'max-w-none h-full w-full flex flex-col justify-center bg-gray-950 px-4 py-6 sm:px-8' : ''"
         >
-          <div class="mb-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-500 dark:text-gray-400">
-            <div class="flex flex-wrap items-center gap-3">
+          <div class="mb-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-500 dark:text-gray-400" :class="isFlashcardFullscreen ? 'text-gray-300' : ''">
+            <div class="flex items-center gap-3">
               <span class="rounded-full bg-gray-100 px-3 py-1 dark:bg-gray-700">{{ category }}</span>
               <span>{{ flashcardIndex + 1 }} / {{ flashcardDeck.length }}</span>
               <span
                 class="rounded-full border px-3 py-1 font-medium"
-                :class="getMemoryStageMeta(currentFlashcard.statusKey).className"
+                :class="getMemoryStageMeta(currentFlashcard.statusKey, category).className"
+                :title="getMemoryStageMeta(currentFlashcard.statusKey, category).hint"
               >
-                {{ getMemoryStageMeta(currentFlashcard.statusKey).label }}
+                {{ getMemoryStageMeta(currentFlashcard.statusKey, category).label }}
               </span>
               <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
                 已记住 {{ getFlashcardMemoryCount(currentFlashcard.statusKey) }} 次
               </span>
+              <span
+                class="rounded-full px-3 py-1"
+                :class="getFlashcardStatus(currentFlashcard.statusKey) === 'known'
+                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+                  : getFlashcardStatus(currentFlashcard.statusKey) === 'unknown'
+                    ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
+                    : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
+              >
+                {{
+                  getFlashcardStatus(currentFlashcard.statusKey) === 'known'
+                    ? '已标记：我认识'
+                    : getFlashcardStatus(currentFlashcard.statusKey) === 'unknown'
+                      ? '已标记：不认识'
+                      : '未标记'
+                }}
+              </span>
             </div>
             <div class="flex items-center gap-2">
-              <button type="button" class="rounded-lg border border-gray-200 px-3 py-1.5 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700" @click.stop="moveFlashcard(-1)">上一张</button>
-              <button type="button" class="rounded-lg border border-gray-200 px-3 py-1.5 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700" @click.stop="moveFlashcard(1)">下一张</button>
+              <button
+                type="button"
+                class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                @click="toggleFlashcardFullscreen"
+              >
+                {{ isFlashcardFullscreen ? '退出全屏' : '全屏' }}
+              </button>
+              <button
+                type="button"
+                class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                @click="moveFlashcard(-1)"
+              >
+                上一张
+              </button>
+              <button
+                type="button"
+                class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                @click="randomFlashcard"
+              >
+                随机
+              </button>
+              <button
+                type="button"
+                class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                @click="moveFlashcard(1)"
+              >
+                下一张
+              </button>
             </div>
           </div>
 
-          <div v-if="!flashcardFlipped" class="min-h-[320px] flex flex-col items-center justify-center text-center">
-            <p class="mb-6 text-2xl font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">Flashcard Front</p>
-            <h4 class="text-[5.5rem] leading-none font-bold text-gray-900 dark:text-white">{{ currentFlashcard.word[0] }}</h4>
-            <p class="mt-6 text-2xl text-gray-500 dark:text-gray-400">{{ currentFlashcard.pos }}</p>
-            <p class="mt-8 text-xl text-gray-400 dark:text-gray-500">点击卡片翻面，回忆中文词义和例句</p>
-          </div>
-          <div v-else class="min-h-[320px]">
-            <p class="text-2xl font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">Flashcard Back</p>
-            <h4 class="mt-3 text-6xl leading-none font-bold text-gray-900 dark:text-white">{{ currentFlashcard.word[0] }}</h4>
-            <p class="mt-4 text-2xl text-gray-500 dark:text-gray-400">{{ currentFlashcard.pos }} · {{ currentFlashcard.meaning }}</p>
-            <div class="mt-6 space-y-5 text-xl text-gray-700 dark:text-gray-200">
-              <div>
-                <p class="text-sm font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">例句</p>
-                <p class="mt-2 leading-[1.6]">{{ currentFlashcard.example || '暂未提供例句。' }}</p>
+          <button
+            type="button"
+            class="w-full border border-sky-200 rounded-2xl bg-gradient-to-br from-sky-50 via-blue-50 to-cyan-100 p-8 text-left shadow-sm transition hover:border-blue-300 hover:shadow-md dark:border-sky-700/60 dark:from-slate-800 dark:via-sky-900/40 dark:to-slate-900 dark:hover:border-blue-500/40"
+            :class="[
+              isFlashcardFullscreen ? 'min-h-[calc(100vh-9rem)] border-sky-300 from-sky-100 via-blue-50 to-cyan-100 dark:border-sky-700 dark:from-slate-900 dark:via-sky-950/70 dark:to-slate-950' : '',
+              flashcardFlipped ? 'cursor-pointer' : '',
+            ]"
+            @click="onFlashcardShellClick"
+          >
+            <div v-if="!flashcardFlipped" class="min-h-[320px] flex flex-col items-center justify-center text-center">
+              <p class="mb-6 text-3xl font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
+                Flashcard Front
+              </p>
+              <div class="mb-6 flex flex-wrap items-center justify-center gap-3 text-xl">
+                <span
+                  class="rounded-full border px-4 py-1.5 font-medium"
+                  :class="getMemoryStageMeta(currentFlashcard.statusKey, category).className"
+                >
+                  {{ getMemoryStageMeta(currentFlashcard.statusKey, category).label }}
+                </span>
+                <span class="rounded-full bg-slate-100 px-4 py-1.5 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                  已记住 {{ getFlashcardMemoryCount(currentFlashcard.statusKey) }} 次
+                </span>
               </div>
-              <div>
-                <p class="text-sm font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">补充</p>
-                <p class="mt-2 leading-[1.6]">{{ currentFlashcard.extra || '暂无补充。' }}</p>
+              <h4 class="text-[6.75rem] leading-none font-bold text-gray-900 dark:text-white">
+                {{ currentFlashcard.word[0] }}
+              </h4>
+              <p class="mt-6 text-3xl text-gray-500 dark:text-gray-400">
+                {{ currentFlashcard.pos }}
+              </p>
+              <p class="mt-8 text-lg text-gray-500 dark:text-gray-400">
+                <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">K</kbd> 认识 → 翻面后需对照释义点「对/错」；
+                <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">U</kbd> 不认识 → 翻面即记入「不认识」，直接看释义即可
+              </p>
+              <div class="mt-8 flex flex-wrap items-center justify-center gap-4" @click.stop>
+                <button
+                  type="button"
+                  class="rounded-xl border-2 border-gray-200 bg-white px-8 py-4 text-2xl font-semibold text-gray-700 transition hover:border-emerald-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                  @click="selectFlashcardPretestAndFlip('known')"
+                >
+                  认识
+                  <span class="mt-1 block text-sm font-normal opacity-70">K</span>
+                </button>
+                <button
+                  type="button"
+                  class="rounded-xl border-2 border-gray-200 bg-white px-8 py-4 text-2xl font-semibold text-gray-700 transition hover:border-amber-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                  @click="selectFlashcardPretestAndFlip('unknown')"
+                >
+                  不认识
+                  <span class="mt-1 block text-sm font-normal opacity-70">U</span>
+                </button>
+              </div>
+              <p class="mt-8 text-xl text-amber-600 dark:text-amber-400">
+                选认识后：背面用 <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">K</kbd>（对）/ <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">U</kbd>（错）；<kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">Space</kbd> 可翻回正面
+              </p>
+            </div>
+
+            <div v-else class="min-h-[320px]">
+              <div class="flex flex-wrap items-start justify-between gap-4">
+                <div class="min-w-0 flex-1">
+                  <p class="text-3xl font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
+                    Flashcard Back
+                  </p>
+                  <p v-if="flashcardPretest === 'known'" class="mt-2 text-xl text-gray-600 dark:text-gray-300">
+                    你正面选了「认识」——请对照释义，用「对 / 错」判断回忆是否准确
+                  </p>
+                  <p v-else class="mt-2 text-xl text-amber-800 dark:text-amber-200">
+                    你已选「不认识」：已自动记入「不认识」，请认真阅读下方释义与例句
+                  </p>
+                  <h4 class="mt-3 text-7xl leading-none font-bold text-gray-900 dark:text-white">
+                    {{ currentFlashcard.word[0] }}
+                  </h4>
+                  <p class="mt-4 text-3xl text-gray-500 dark:text-gray-400">
+                    {{ currentFlashcard.pos }} · {{ currentFlashcard.meaning }}
+                  </p>
+                  <div class="mt-5 flex flex-wrap items-center gap-3 text-xl">
+                    <span
+                      class="rounded-full border px-4 py-1.5 font-medium"
+                      :class="getMemoryStageMeta(currentFlashcard.statusKey, category).className"
+                    >
+                      {{ getMemoryStageMeta(currentFlashcard.statusKey, category).label }}
+                    </span>
+                    <span class="rounded-full bg-slate-100 px-4 py-1.5 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                      已记住 {{ getFlashcardMemoryCount(currentFlashcard.statusKey) }} 次
+                    </span>
+                    <span class="text-lg text-gray-500 dark:text-gray-400">
+                      {{ getMemoryStageMeta(currentFlashcard.statusKey, category).hint }}
+                    </span>
+                  </div>
+                </div>
+                <div class="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center" @click.stop>
+                  <template v-if="flashcardPretest === 'known'">
+                    <button
+                      type="button"
+                      class="border border-emerald-300 rounded-lg bg-emerald-50 px-5 py-3 text-2xl font-semibold text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-500/25"
+                      @click="confirmFlashcardBack(true)"
+                    >
+                      对
+                      <span class="mt-1 block text-sm font-normal opacity-80">与背面一致 → 我认识 · 快捷键 K</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="border border-red-300 rounded-lg bg-red-50 px-5 py-3 text-2xl font-semibold text-red-800 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-200 hover:bg-red-100 dark:hover:bg-red-500/25"
+                      @click="confirmFlashcardBack(false)"
+                    >
+                      错
+                      <span class="mt-1 block text-sm font-normal opacity-80">记错了 → 标记不认识 · 快捷键 U</span>
+                    </button>
+                  </template>
+                  <button
+                    type="button"
+                    class="i-carbon-volume-up-filled text-5xl text-gray-500 dark:text-gray-400 hover:text-blue-600"
+                    :title="`播放 ${currentFlashcard.word[0]} 发音`"
+                    @click="play(getWordAudioPath(category, currentFlashcard.word[0]))"
+                  />
+                </div>
+              </div>
+
+              <div class="mt-8 space-y-7 text-3xl text-gray-700 dark:text-gray-200">
+                <div>
+                  <p class="text-2xl font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
+                    例句
+                  </p>
+                  <p class="mt-3 leading-[1.5]">
+                    {{ currentFlashcard.example || '暂未提供例句。' }}
+                  </p>
+                </div>
+                <div>
+                  <p class="text-2xl font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
+                    补充
+                  </p>
+                  <p class="mt-3 leading-[1.5]">
+                    {{ currentFlashcard.extra || '暂无补充。' }}
+                  </p>
+                </div>
               </div>
             </div>
-            <div class="mt-8 flex flex-wrap items-center gap-3">
-              <button type="button" class="rounded-lg border border-emerald-200 px-5 py-3 text-lg text-emerald-700 dark:border-emerald-500/30 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10" @click.stop="markFlashcard('known')">我认识</button>
-              <button type="button" class="rounded-lg border border-amber-200 px-5 py-3 text-lg text-amber-700 dark:border-amber-500/30 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-500/10" @click.stop="markFlashcard('unknown')">不认识</button>
-              <button type="button" class="i-ph-speaker-simple-high-bold text-3xl text-gray-500 dark:text-gray-400 hover:text-blue-600" @click.stop="play(getWordAudioPath(category, currentFlashcard.word[0]))" />
-            </div>
-          </div>
+          </button>
+        </div>
+        <div v-else class="border border-gray-300 rounded-xl border-dashed px-6 py-10 text-center text-sm text-gray-500 dark:border-gray-600 dark:text-gray-400">
+          当前筛选条件下没有可用单词，请调整章节或筛选后再试。
         </div>
       </div>
       <div v-else class="mt-6 space-y-4">
