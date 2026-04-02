@@ -1,9 +1,102 @@
 <script setup lang="ts">
 import vocabulary from './vocabulary'
+import listeningWords from '../listening/listening179.json'
+import keywordMarkdown from '../reading/538keyword.md?raw'
+import readingWords from '../reading/reading538words'
 
 const CHAPTER_KEY = 'vocabulary_typing_chapter'
-const chapters = Object.keys(vocabulary)
-const selectedChapter = ref(localStorage.getItem(CHAPTER_KEY) || chapters[0])
+
+function normalizeReadingWord(word: string) {
+  return word.replace(/\*/g, '').trim()
+}
+
+function createExampleMap(markdown: string) {
+  const map = new Map<string, string>()
+
+  for (const rawLine of markdown.split('\n')) {
+    const line = rawLine.trim()
+    if (!line.startsWith('|'))
+      continue
+    if (line.includes('考点词') || line.startsWith('|---'))
+      continue
+
+    const parts = line.split('|').map(part => part.trim())
+    if (parts.length < 8)
+      continue
+
+    const word = normalizeReadingWord(parts[2]).toLowerCase()
+    const example = parts[6]
+    if (word && example)
+      map.set(word, example)
+  }
+
+  return map
+}
+
+const readingExampleMap = createExampleMap(keywordMarkdown)
+const readingTypingChapters = Object.fromEntries(
+  (readingWords as any[]).map((category) => {
+    const key = `阅读 538 - ${category.title}`
+    return [key, {
+      label: key,
+      source: 'reading',
+      groupCount: 1,
+      wordCount: category.words.length,
+      words: [category.words.map((row: any[]) => {
+        const word = normalizeReadingWord(row[1])
+        return {
+          id: row[0],
+          spellError: false,
+          spellValue: '',
+          showSource: false,
+          word: [word],
+          pos: row[2].filter(Boolean).join(' / ') || '词组',
+          meaning: row[3].join('；'),
+          example: readingExampleMap.get(word.toLowerCase()) || '',
+          extra: row[5] || '-',
+        }
+      })],
+    }]
+  }),
+)
+
+const listeningTypingChapter = {
+  '听力 179 考点词': {
+    label: '听力 179 考点词',
+    source: 'listening',
+    groupCount: 1,
+    wordCount: (listeningWords as any[]).length,
+    words: [(listeningWords as any[]).map(item => ({
+      id: item.index,
+      spellError: false,
+      spellValue: '',
+      showSource: false,
+      word: [item.word],
+      pos: item.type || '词组',
+      meaning: item.meaning,
+      example: item.replace?.length ? `同义替换：${item.replace.join(', ')}` : '',
+      extra: '-',
+    }))],
+  },
+}
+
+const chapterMap = {
+  ...(vocabulary as any),
+  ...listeningTypingChapter,
+  ...readingTypingChapters,
+}
+
+const route = useRoute()
+const chapters = Object.keys(chapterMap)
+const routeChapter = typeof route.query.chapter === 'string' ? route.query.chapter : ''
+const storedChapter = localStorage.getItem(CHAPTER_KEY)
+const selectedChapter = ref(
+  routeChapter && chapterMap[routeChapter]
+    ? routeChapter
+    : storedChapter && chapterMap[storedChapter]
+      ? storedChapter
+      : chapters[0],
+)
 
 const currentWordIndex = ref(0)
 const userInput = ref('')
@@ -13,7 +106,7 @@ const accuracy = ref(100)
 const isFinished = ref(false)
 
 const words = computed(() => {
-  const chapter = (vocabulary as any)[selectedChapter.value]
+  const chapter = chapterMap[selectedChapter.value]
   if (!chapter)
     return []
   // Flatten groups into a single list of words
@@ -28,6 +121,14 @@ watch(selectedChapter, (newVal) => {
   reset()
 })
 
+watch(
+  () => route.query.chapter,
+  (chapter) => {
+    if (typeof chapter === 'string' && chapterMap[chapter] && chapter !== selectedChapter.value)
+      selectedChapter.value = chapter
+  },
+)
+
 function reset() {
   currentWordIndex.value = 0
   userInput.value = ''
@@ -41,14 +142,19 @@ function reset() {
 let audio = null as HTMLAudioElement | null
 function playAudio() {
   const category = selectedChapter.value
+  const chapter = chapterMap[category]
   const word = currentWord.value
-  const audioPath = `vocabulary/audio/${category}/${word}.mp3`
   if (audio) {
     audio.pause()
     audio.currentTime = 0
   }
   audio = document.createElement('audio')
-  audio.src = audioPath
+  if (chapter?.source === 'reading')
+    audio.src = `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(word)}&type=1`
+  else if (chapter?.source === 'listening')
+    audio.src = `/179_audios/${word}.mp3`
+  else
+    audio.src = `vocabulary/audio/${category}/${word}.mp3`
   audio.play()
 }
 

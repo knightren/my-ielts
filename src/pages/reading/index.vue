@@ -679,6 +679,10 @@ function createMetaFromSynonym(synonym, row) {
   }
 }
 
+function getTypingPracticeChapter(title) {
+  return `阅读 538 - ${title}`
+}
+
 function getWordCardPosition(target) {
   const rect = target.getBoundingClientRect()
   const viewportWidth = window.innerWidth
@@ -1326,6 +1330,15 @@ async function showWordToast(meta, event) {
                   {{ cat.title }}
                 </h3>
                 <span class="text-base font-normal text-gray-500 dark:text-gray-400">{{ cat.define }}</span>
+              </div>
+              <div class="mb-4 lg:mb-0">
+                <button
+                  type="button"
+                  class="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 focus:outline-none focus:ring-4 focus:ring-sky-300 dark:bg-sky-500 dark:hover:bg-sky-600 dark:focus:ring-sky-800"
+                  @click="$router.push({ path: '/vocabulary/typing', query: { chapter: getTypingPracticeChapter(cat.title) } })"
+                >
+                  该类单词打字练习
+                </button>
               </div>
             </div>
             <div class="mt-6">

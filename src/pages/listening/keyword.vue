@@ -29,6 +29,13 @@ const keyword = ref('')
         >
           练习
         </button>
+        <button
+          type="button"
+          class="ml-2 rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-medium text-white dark:bg-sky-500 hover:bg-sky-700 focus:outline-none focus:ring-4 focus:ring-sky-300 dark:hover:bg-sky-600 dark:focus:ring-sky-800"
+          @click="$router.push({ path: '/vocabulary/typing', query: { chapter: '听力 179 考点词' } })"
+        >
+          单词打字练习
+        </button>
         <!-- <input type="text" name="email" class="ml-3 block w-full border border-gray-300 rounded-lg bg-gray-50 p-2.5 text-gray-900 dark:border-gray-600 focus:border-primary-500 dark:bg-gray-700 sm:text-sm dark:text-white focus:ring-primary-500 dark:focus:border-primary-500 dark:focus:ring-primary-500 dark:placeholder-gray-400" placeholder="关键词"> -->
         <div class="relative ml-2 flex-1">
           <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
