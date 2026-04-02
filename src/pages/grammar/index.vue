@@ -12,7 +12,28 @@
       <h3 class="mb-4 text-xl font-semibold dark:text-white">
         视频
       </h3>
-      <iframe style="width: 100%; aspect-ratio: 16 / 9;" class="mb-4" src="https://www.youtube.com/embed/bxvyZwACfNk?si=_dXajzpGFCYZ1gOa" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+      <iframe style="width: 100%; aspect-ratio: 16 / 9;" class="mb-4" src="https://www.youtube.com/embed/is7vn5URVcc" title="Grammar video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen />
+      <div class="mb-4 text-sm space-y-2">
+        <p class="text-gray-500 dark:text-gray-400">
+          原视频已失效，当前替换为可用的语法体系视频，并附一个长难句分析备用链接：
+        </p>
+        <div>
+          <a
+            class="text-primary-700 dark:text-primary-500 hover:underline"
+            href="https://www.youtube.com/watch?v=is7vn5URVcc"
+            target="_blank"
+            rel="noopener noreferrer"
+          >主视频：一个视频说清整个英语语法体系（YouTube）</a>
+        </div>
+        <div>
+          <a
+            class="text-primary-700 dark:text-primary-500 hover:underline"
+            href="https://www.bilibili.com/video/BV1m24y127Es/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >备用视频：一招教你又快又准读懂句子（Bilibili）</a>
+        </div>
+      </div>
       <h3 class="mb-4 text-xl font-semibold dark:text-white">
         讲义
       </h3>

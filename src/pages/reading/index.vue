@@ -5,8 +5,15 @@ import words from './reading538words'
 const ws = reactive(words)
 
 const keyword = ref('')
+const columnVisibility = reactive({
+  word: true,
+  type: true,
+  meaning: true,
+  synonyms: true,
+})
 
 const exampleMap = createExampleMap(keywordMarkdown)
+const wordMetaMap = createWordMetaMap(words, exampleMap)
 const dictionaryCache = new Map()
 const currentToastRequestId = ref(0)
 const wordToast = reactive({
@@ -34,6 +41,10 @@ function normalizeWord(word) {
   return word.replace(/\*/g, '').trim()
 }
 
+function toggleColumn(columnKey) {
+  columnVisibility[columnKey] = !columnVisibility[columnKey]
+}
+
 function createExampleMap(markdown) {
   const map = new Map()
   for (const line of markdown.split('\n')) {
@@ -51,6 +62,30 @@ function createExampleMap(markdown) {
     if (word && example)
       map.set(word.toLowerCase(), example)
   }
+  return map
+}
+
+function createWordMetaMap(categories, examples) {
+  const map = new Map()
+
+  for (const category of categories) {
+    for (const row of category.words) {
+      const word = normalizeWord(row[1])
+      if (!word)
+        continue
+
+      map.set(word.toLowerCase(), {
+        word,
+        rawWord: row[1],
+        type: row[2].filter(Boolean).join(' / ') || '词组',
+        meaning: row[3].join('；'),
+        synonyms: row[4].filter(Boolean),
+        note: row[5] || '',
+        example: examples.get(word.toLowerCase()) || '',
+      })
+    }
+  }
+
   return map
 }
 
@@ -72,11 +107,11 @@ function closeWordToast() {
   wordToast.visible = false
 }
 
-function buildMemoryHint(row) {
-  const word = normalizeWord(row[1])
-  const meaning = row[3].filter(Boolean)[0] || '核心含义'
-  const synonym = row[4].filter(Boolean)[0] || ''
-  const typeText = row[2].filter(Boolean).join(' ').toLowerCase()
+function buildMemoryHint(meta) {
+  const word = normalizeWord(meta.word)
+  const meaning = meta.meaning.split('；').filter(Boolean)[0] || '核心含义'
+  const synonym = meta.synonyms?.[0] || ''
+  const typeText = meta.type.toLowerCase()
   const lowerWord = word.toLowerCase()
 
   const affixHints = [
@@ -110,6 +145,38 @@ function buildMemoryHint(row) {
     return `把 ${word} 放进动作里记，重点感受它如何补充“怎么发生、到什么程度”。`
 
   return `先把 ${word} 和“${meaning}”一对一绑定${synonym ? `，再用同义替换 ${synonym}` : ''}和例句一起复现这个词。`
+}
+
+function createMetaFromRow(row) {
+  const word = normalizeWord(row[1])
+  return {
+    word,
+    rawWord: row[1],
+    type: row[2].filter(Boolean).join(' / ') || '词组',
+    meaning: row[3].join('；'),
+    synonyms: row[4].filter(Boolean),
+    note: row[5] || '',
+    example: exampleMap.get(word.toLowerCase()) || '',
+  }
+}
+
+function createMetaFromSynonym(synonym, row) {
+  const normalizedSynonym = normalizeWord(synonym)
+  const storedMeta = wordMetaMap.get(normalizedSynonym.toLowerCase())
+  if (storedMeta)
+    return storedMeta
+
+  const baseWord = normalizeWord(row[1])
+  const baseMeaning = row[3].join('；')
+  return {
+    word: normalizedSynonym,
+    rawWord: synonym,
+    type: '同义替换',
+    meaning: `近义联想：${baseMeaning}`,
+    synonyms: [baseWord],
+    note: `该词作为 ${baseWord} 的同义替换出现，可和原考点词对照记忆。`,
+    example: exampleMap.get(normalizedSynonym.toLowerCase()) || '',
+  }
 }
 
 function getWordCardPosition(target) {
@@ -237,12 +304,12 @@ async function fetchDictionaryToken(token) {
   return dictionaryCache.get(key)
 }
 
-async function showWordToast(row, event) {
-  const rawWord = row[1]
+async function showWordToast(meta, event) {
+  const rawWord = meta.rawWord || meta.word
   const normalizedWord = normalizeWord(rawWord)
-  const typeText = row[2].filter(Boolean).join(' / ') || '词组'
-  const meaningText = row[3].join('；')
-  const localExample = exampleMap.get(normalizedWord.toLowerCase()) || ''
+  const typeText = meta.type || '词组'
+  const meaningText = meta.meaning || ''
+  const localExample = meta.example || exampleMap.get(normalizedWord.toLowerCase()) || ''
   const currentTarget = event?.currentTarget
   const positionStyle = currentTarget instanceof HTMLElement ? getWordCardPosition(currentTarget) : wordToast.positionStyle
   const requestId = currentToastRequestId.value + 1
@@ -255,10 +322,15 @@ async function showWordToast(row, event) {
   wordToast.phonetic = ''
   wordToast.syllables = splitWordIntoSyllables(normalizedWord)
   wordToast.example = localExample
-  wordToast.memoryHint = buildMemoryHint(row)
+  wordToast.memoryHint = buildMemoryHint({
+    word: normalizedWord,
+    meaning: meaningText,
+    synonyms: meta.synonyms || [],
+    type: typeText,
+  })
   wordToast.meaning = meaningText
   wordToast.type = typeText
-  wordToast.note = row[5] || ''
+  wordToast.note = meta.note || ''
   wordToast.error = ''
   wordToast.positionStyle = positionStyle
 
@@ -327,6 +399,48 @@ async function showWordToast(row, event) {
           </div>
         </div>
         <div class="mt-6">
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="border rounded-full px-3 py-1 text-xs font-medium transition"
+              :class="columnVisibility.word
+                ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="toggleColumn('word')"
+            >
+              {{ columnVisibility.word ? '隐藏考点词' : '显示考点词' }}
+            </button>
+            <button
+              type="button"
+              class="border rounded-full px-3 py-1 text-xs font-medium transition"
+              :class="columnVisibility.type
+                ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="toggleColumn('type')"
+            >
+              {{ columnVisibility.type ? '隐藏词性' : '显示词性' }}
+            </button>
+            <button
+              type="button"
+              class="border rounded-full px-3 py-1 text-xs font-medium transition"
+              :class="columnVisibility.meaning
+                ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="toggleColumn('meaning')"
+            >
+              {{ columnVisibility.meaning ? '隐藏词义' : '显示词义' }}
+            </button>
+            <button
+              type="button"
+              class="border rounded-full px-3 py-1 text-xs font-medium transition"
+              :class="columnVisibility.synonyms
+                ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="toggleColumn('synonyms')"
+            >
+              {{ columnVisibility.synonyms ? '隐藏同义替换' : '显示同义替换' }}
+            </button>
+          </div>
           <table class="w-full text-left text-sm text-gray-500 dark:text-gray-400">
             <thead class="bg-gray-50 text-xs uppercase text-gray-700 dark:bg-gray-700 dark:text-gray-400">
               <tr>
@@ -335,16 +449,52 @@ async function showWordToast(row, event) {
                 </th>
                 <th class="w-0 px-6 py-3" />
                 <th scope="col" class="w-0 px-6 py-3">
-                  考点词
+                  <div class="flex items-center gap-2">
+                    <span>考点词</span>
+                    <button
+                      type="button"
+                      class="border border-transparent rounded px-2 py-0.5 text-[10px] normal-case text-gray-500 hover:border-gray-300 dark:text-gray-300 hover:text-gray-700 dark:hover:border-gray-500 dark:hover:text-white"
+                      @click="toggleColumn('word')"
+                    >
+                      {{ columnVisibility.word ? '隐藏' : '显示' }}
+                    </button>
+                  </div>
                 </th>
                 <th scope="col" class="w-0 px-6 py-3">
-                  词性
+                  <div class="flex items-center gap-2">
+                    <span>词性</span>
+                    <button
+                      type="button"
+                      class="border border-transparent rounded px-2 py-0.5 text-[10px] normal-case text-gray-500 hover:border-gray-300 dark:text-gray-300 hover:text-gray-700 dark:hover:border-gray-500 dark:hover:text-white"
+                      @click="toggleColumn('type')"
+                    >
+                      {{ columnVisibility.type ? '隐藏' : '显示' }}
+                    </button>
+                  </div>
                 </th>
                 <th scope="col" class="w-80 px-6 py-3">
-                  词义
+                  <div class="flex items-center gap-2">
+                    <span>词义</span>
+                    <button
+                      type="button"
+                      class="border border-transparent rounded px-2 py-0.5 text-[10px] normal-case text-gray-500 hover:border-gray-300 dark:text-gray-300 hover:text-gray-700 dark:hover:border-gray-500 dark:hover:text-white"
+                      @click="toggleColumn('meaning')"
+                    >
+                      {{ columnVisibility.meaning ? '隐藏' : '显示' }}
+                    </button>
+                  </div>
                 </th>
                 <th scope="col" class="px-6 py-3">
-                  同义替换
+                  <div class="flex items-center gap-2">
+                    <span>同义替换</span>
+                    <button
+                      type="button"
+                      class="border border-transparent rounded px-2 py-0.5 text-[10px] normal-case text-gray-500 hover:border-gray-300 dark:text-gray-300 hover:text-gray-700 dark:hover:border-gray-500 dark:hover:text-white"
+                      @click="toggleColumn('synonyms')"
+                    >
+                      {{ columnVisibility.synonyms ? '隐藏' : '显示' }}
+                    </button>
+                  </div>
                 </th>
               </tr>
             </thead>
@@ -361,12 +511,12 @@ async function showWordToast(row, event) {
                   <button type="button" class="i-carbon-volume-up-filled block" @click="play(w[1])" />
                 </td>
                 <th scope="row" class="whitespace-nowrap px-6 py-4 font-medium text-gray-900 dark:text-white">
-                  <div class="flex items-center gap-2">
+                  <div v-if="columnVisibility.word" class="flex items-center gap-2">
                     <button
                       type="button"
                       class="text-left hover:underline"
                       :title="`查看 ${normalizeWord(w[1])} 的记忆词卡`"
-                      @click="showWordToast(w, $event)"
+                      @click="showWordToast(createMetaFromRow(w), $event)"
                     >
                       {{ w[1] }}
                     </button>
@@ -377,19 +527,47 @@ async function showWordToast(row, event) {
                       target="_blank"
                     />
                   </div>
+                  <span v-else class="text-gray-400 dark:text-gray-500">已隐藏，请先回忆单词</span>
                 </th>
                 <td
+                  v-if="columnVisibility.type"
                   class="px-6 py-4 italic"
                   v-html="w[2].join('<br>')"
                 />
                 <td
+                  v-else
+                  class="px-6 py-4 italic text-gray-400 dark:text-gray-500"
+                >
+                  已隐藏
+                </td>
+                <td
+                  v-if="columnVisibility.meaning"
                   class="px-6 py-4"
                   v-html="w[3].join('<br>')"
                 />
+                <td
+                  v-else
+                  class="px-6 py-4 text-gray-400 dark:text-gray-500"
+                >
+                  已隐藏，请先回忆词义
+                </td>
                 <td class="px-6 py-4">
-                  {{ w[4].join(', ') }}
-                  <br>
-                  {{ w[5].length > 0 ? w[5] : '' }}
+                  <template v-if="columnVisibility.synonyms">
+                    <template v-for="(synonym, idx) in w[4]" :key="`${w[0]}_${synonym}`">
+                      <button
+                        type="button"
+                        class="inline text-left text-blue-700 dark:text-blue-400 hover:underline"
+                        :title="`查看同义替换 ${normalizeWord(synonym)} 的记忆词卡`"
+                        @click="showWordToast(createMetaFromSynonym(synonym, w), $event)"
+                      >
+                        {{ synonym }}
+                      </button>
+                      <span v-if="idx < w[4].length - 1">, </span>
+                    </template>
+                    <br>
+                    {{ w[5].length > 0 ? w[5] : '' }}
+                  </template>
+                  <span v-else class="text-gray-400 dark:text-gray-500">已隐藏，请先回忆同义替换</span>
                 </td>
               </tr>
             </tbody>
