@@ -115,6 +115,12 @@ const words = computed(() => {
 
 const currentWordData = computed(() => words.value[currentWordIndex.value])
 const currentWord = computed(() => currentWordData.value?.word[0] || '')
+/** 按 Unicode 标量拆分，短语中的空格与逐字层对齐 */
+const currentWordChars = computed((): string[] => Array.from(String(currentWord.value ?? '')))
+
+function displayChar(c: string) {
+  return c === ' ' ? '\u00A0' : c
+}
 
 watch(selectedChapter, (newVal) => {
   localStorage.setItem(CHAPTER_KEY, newVal)
@@ -262,28 +268,40 @@ onMounted(() => {
       <div
         class="relative bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-700 min-h-80 flex flex-col items-center justify-center overflow-hidden"
       >
-        <!-- Container for aligned layers -->
+        <!-- 逐字双层对齐：避免 flex 拆字时空格塌缩，短语（如 rely on）可正常练习 -->
         <div
-          class="relative font-mono text-4xl sm:text-6xl md:text-7xl font-black tracking-tighter whitespace-pre-wrap text-center break-all mb-8"
+          class="relative mb-8 min-h-[1.25em] font-mono text-4xl font-black tracking-tighter sm:text-6xl md:text-7xl"
         >
-          <!-- Background Word (Grey) -->
-          <div class="text-gray-100 dark:text-gray-700">
-            {{ currentWord }}
-          </div>
-
-          <!-- Feedback Layer (Overlay) -->
-          <div class="absolute inset-0 flex">
+          <div
+            class="flex flex-wrap justify-center gap-x-0 text-center leading-none"
+            aria-hidden="true"
+          >
             <span
-              v-for="(char, index) in currentWord"
-              :key="index"
-              class="inline-block"
-              :class="{
-                'text-green-500': userInput.charAt(Number(index)) === char,
-                'text-red-500': userInput.charAt(Number(index)) !== '' && userInput.charAt(Number(index)) !== char,
-                'text-transparent': userInput.charAt(Number(index)) === '',
-              }"
+              v-for="(char, index) in currentWordChars"
+              :key="`g-${index}`"
+              class="inline-block text-gray-100 dark:text-gray-700"
+              :class="char === ' ' ? 'min-w-[0.55ch]' : ''"
             >
-              {{ char }}
+              {{ displayChar(char) }}
+            </span>
+          </div>
+          <div
+            class="absolute inset-0 flex flex-wrap justify-center gap-x-0 text-center leading-none"
+          >
+            <span
+              v-for="(char, index) in currentWordChars"
+              :key="`c-${index}`"
+              class="inline-block"
+              :class="[
+                char === ' ' ? 'min-w-[0.55ch]' : '',
+                userInput.charAt(index) === char
+                  ? 'text-green-500'
+                  : userInput.charAt(index) !== ''
+                    ? 'text-red-500'
+                    : 'text-transparent',
+              ]"
+            >
+              {{ displayChar(char) }}
             </span>
           </div>
         </div>
@@ -291,7 +309,7 @@ onMounted(() => {
         <!-- Invisible Input covering the whole area -->
         <input
           type="text"
-          class="absolute inset-0 opacity-0 w-full h-full cursor-default caret-transparent"
+          class="absolute inset-0 w-full h-full cursor-default opacity-0 caret-transparent"
           autofocus
           autocapitalize="off"
           autocorrect="off"
