@@ -1,22 +1,14 @@
 <script setup>
+import { useRoute } from 'vue-router'
 import categories from './reading538words'
 
-const words = []
-for (const cat of categories) {
-  for (const row of cat.words) {
-    words.push({
-      index: row[0],
-      word: row[1],
-      type: row[2].filter(Boolean).join(' '),
-      meaning: row[3].join('；'),
-      replace: row[4],
-    })
-  }
-}
-
-const ws = reactive(words.map((v) => {
+function buildRow(row) {
   return {
-    ...v,
+    index: row[0],
+    word: row[1],
+    type: row[2].filter(Boolean).join(' '),
+    meaning: row[3].join('；'),
+    replace: row[4],
     form: {
       word: '',
       replaceStr: '',
@@ -26,7 +18,33 @@ const ws = reactive(words.map((v) => {
       errorWords: [],
     },
   }
-}))
+}
+
+function buildWsForCategory(catIndex) {
+  const cat = categories[catIndex]
+  if (!cat)
+    return []
+  return cat.words.map(row => buildRow(row))
+}
+
+const route = useRoute()
+const initialCat = (() => {
+  const q = route.query.category
+  if (typeof q === 'string') {
+    const n = Number.parseInt(q, 10)
+    if (n >= 0 && n < categories.length)
+      return n
+  }
+  return 0
+})()
+
+const selectedCategoryIndex = ref(initialCat)
+const ws = reactive(buildWsForCategory(selectedCategoryIndex.value))
+
+watch(selectedCategoryIndex, (idx) => {
+  const next = buildWsForCategory(idx)
+  ws.splice(0, ws.length, ...next)
+})
 
 let audio = null
 function play(word) {
@@ -46,11 +64,17 @@ function onKeydown(e, word) {
   }
 }
 
-function next(index) {
-  const i = index + 1
-  if (i >= words.length)
-    return
+function focusReplaceInput(index) {
+  document.getElementById(`replace_${index}`)?.focus()
+}
 
+/** 考点词框回车：跳到同一行同义替换框 */
+function onWordEnter(e, rowIndex) {
+  e.preventDefault()
+  focusReplaceInput(ws[rowIndex].index)
+}
+
+function submitRowAndGoNext(index) {
   const cw = ws[index]
   const practiceWord = cw.form.word.trim().toLowerCase()
   const practiceReplace = cw.form.replaceStr.split(/[,，]/).map(v => v.trim().toLowerCase().replace(/\s+/g, ' ')).filter(Boolean)
@@ -66,9 +90,12 @@ function next(index) {
   cw.result.checked = true
   cw.result.errorWords = errorWords
 
-  const nw = words[i]
-  play(nw.word)
-  document.getElementById(`input_${nw.index}`)?.focus()
+  const i = index + 1
+  if (i < ws.length) {
+    const nw = ws[i]
+    play(nw.word)
+    document.getElementById(`input_${nw.index}`)?.focus()
+  }
 }
 </script>
 
@@ -80,18 +107,34 @@ function next(index) {
           阅读 538 考点词练习
         </h3>
         <ul class="ml-4 list-decimal text-sm font-normal text-gray-500 dark:text-gray-400">
+          <li>每次只练一类考点词；可在下方切换「第 1 / 2 / 3 类」。</li>
           <li>同义替换多个词使用英文逗号 <kbd class="rounded-lg bg-gray-100 px-2 text-xs font-semibold text-gray-800 dark:border-gray-500 dark:bg-gray-600 dark:text-gray-100">,</kbd> 分割</li>
           <li>发音使用有道在线朗读；点击喇叭或按 <kbd class="rounded-lg bg-gray-100 px-2 text-xs font-semibold text-gray-800 dark:border-gray-500 dark:bg-gray-600 dark:text-gray-100">`</kbd>（数字 1 左侧）播放当前行考点词</li>
-          <li>输入完考点词按 Tab 切换到同义词，输入完同义词按 Enter 校验并进入下一词</li>
+          <li>考点词填完按 Enter 跳到同义替换框；同义替换填完按 Enter 校验并进入下一词考点词框</li>
           <li>单词之间多个空格、逗号后是否有空格不影响判断；考点词与同义词均不区分大小写</li>
         </ul>
       </div>
-      <div class="items-center sm:flex">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+          <span class="whitespace-nowrap">练习类别</span>
+          <select
+            v-model.number="selectedCategoryIndex"
+            class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+          >
+            <option
+              v-for="(cat, idx) in categories"
+              :key="cat.title"
+              :value="idx"
+            >
+              {{ cat.title }}（{{ cat.words.length }} 词）
+            </option>
+          </select>
+        </label>
         <div class="flex items-center">
           <button
             type="button"
             class="rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-medium text-white dark:bg-blue-600 hover:bg-blue-800 focus:outline-none focus:ring-4 focus:ring-blue-300 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
-            @click="() => { play(words[0].word) }"
+            @click="ws.length && play(ws[0].word)"
           >
             开始
           </button>
@@ -128,7 +171,7 @@ function next(index) {
               {{ w.type }}
             </td>
             <td class="px-6 py-4">
-              <button class="i-carbon-volume-up-filled" @click="play(w.word)" />
+              <button type="button" class="i-carbon-volume-up-filled" @click="play(w.word)" />
             </td>
             <td
               class="flex flex-row items-center justify-start px-6 py-4"
@@ -145,11 +188,13 @@ function next(index) {
                 spellcheck="false"
                 type="text"
                 placeholder="请输入..."
+                @keydown.enter="onWordEnter($event, i)"
               >
               <div class="px-4">
                 {{ w.meaning }}
               </div>
               <input
+                :id="`replace_${w.index}`"
                 v-model="w.form.replaceStr"
                 p="x-2 y-1"
                 w="300px"
@@ -159,7 +204,7 @@ function next(index) {
                 type="text"
                 spellcheck="false"
                 placeholder="请输入..."
-                @keydown.enter="next(i)"
+                @keydown.enter="submitRowAndGoNext(i)"
               >
             </td>
             <td class="px-6 py-4">
