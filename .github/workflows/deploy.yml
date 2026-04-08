@@ -45,6 +45,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
+        env:
+          VITE_SUPABASE_URL: https://erknlrvuytrrgvidygol.supabase.co
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: pnpm run build
 
       - name: Upload Pages artifact
