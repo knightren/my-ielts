@@ -10,6 +10,23 @@ let syncTimer: ReturnType<typeof setInterval> | null = null
 let syncSoonTimer: ReturnType<typeof setTimeout> | null = null
 const SYNC_MS = 45_000
 
+function clearSupabaseAuthStorage() {
+  if (typeof window === 'undefined')
+    return
+
+  const prefixes = ['sb-', 'supabase.auth.token']
+  for (const storage of [window.localStorage, window.sessionStorage]) {
+    const keysToRemove: string[] = []
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i)
+      if (key && prefixes.some(prefix => key.startsWith(prefix)))
+        keysToRemove.push(key)
+    }
+    for (const key of keysToRemove)
+      storage.removeItem(key)
+  }
+}
+
 function stopPeriodicSync() {
   if (syncTimer) {
     clearInterval(syncTimer)
@@ -118,6 +135,7 @@ export async function signOut() {
   authUser.value = null
 
   const { error } = await supabase.auth.signOut({ scope: 'local' })
+  clearSupabaseAuthStorage()
   if (error)
     throw error
 }
