@@ -1287,7 +1287,7 @@ async function showWordToast(meta, event) {
             type="button"
             class="inline-block w-full rounded-l-lg p-4"
             :class="activeTab === 'concepts'
-              ? 'bg-gray-100 text-gray-900 dark:bg-gray-700 dark:text-white'
+              ? 'bg-blue-50 font-semibold text-blue-700 dark:bg-blue-500/15 dark:text-blue-300'
               : 'bg-white text-gray-500 dark:bg-gray-800 dark:text-gray-400'"
             @click="activeTab = 'concepts'"
           >
@@ -1299,7 +1299,7 @@ async function showWordToast(meta, event) {
             type="button"
             class="inline-block w-full rounded-r-lg p-4"
             :class="activeTab === 'keywords'
-              ? 'bg-gray-100 text-gray-900 dark:bg-gray-700 dark:text-white'
+              ? 'bg-blue-50 font-semibold text-blue-700 dark:bg-blue-500/15 dark:text-blue-300'
               : 'bg-white text-gray-500 dark:bg-gray-800 dark:text-gray-400'"
             @click="activeTab = 'keywords'"
           >

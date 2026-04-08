@@ -58,7 +58,9 @@ const showMobileMenu = ref(false)
                 :key="m.label"
               >
                 <router-link
-                  :class="$route.path === m.link ? 'block flex flex-row items-center rounded text-primary-700 dark:text-primary-500' : 'block flex flex-row items-center text-gray-700 dark:text-gray-400 hover:text-primary-700 dark:hover:text-white'"
+                  :class="$route.path === m.link
+                    ? 'block flex flex-row items-center rounded-full bg-blue-50 px-3 py-1.5 font-semibold text-blue-700 shadow-sm dark:bg-blue-500/15 dark:text-blue-300'
+                    : 'block flex flex-row items-center rounded-full px-3 py-1.5 text-gray-700 dark:text-gray-400 hover:bg-gray-100 hover:text-primary-700 dark:hover:bg-gray-700 dark:hover:text-white'"
                   :to="m.link"
                 >
                   <i class="mr-1 inline-block" :class="m.icon" /> {{ m.label }}
@@ -104,6 +106,9 @@ const showMobileMenu = ref(false)
         >
           <router-link
             class="block px-4 py-3 text-gray-900 lg:px-0 lg:py-0 dark:text-white lg:hover:underline"
+            :class="$route.path === m.link
+              ? 'bg-blue-50 font-semibold text-blue-700 dark:bg-blue-500/15 dark:text-blue-300'
+              : ''"
             :to="m.link"
             @click="showMobileMenu = false"
           >
