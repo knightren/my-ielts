@@ -115,14 +115,11 @@ export async function signOut() {
 
   authError.value = null
   stopPeriodicSync()
-  const previousUser = authUser.value
   authUser.value = null
 
-  const { error } = await supabase.auth.signOut()
-  if (error) {
-    authUser.value = previousUser
+  const { error } = await supabase.auth.signOut({ scope: 'local' })
+  if (error)
     throw error
-  }
 }
 
 export function isSupabaseEnabled() {
