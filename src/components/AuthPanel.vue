@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import {
   authError,
-  authReady,
   authUser,
   isSupabaseEnabled,
   signInWithEmail,
@@ -92,10 +91,9 @@ async function onSignOut() {
       <button
         type="button"
         class="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white dark:bg-blue-500 hover:bg-blue-700 dark:hover:bg-blue-600"
-        :disabled="!authReady"
         @click="open = true"
       >
-        {{ authReady ? '登录' : '连接中...' }}
+        登录
       </button>
     </template>
 
