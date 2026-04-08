@@ -71,7 +71,7 @@ async function onSignOut() {
 
 <template>
   <div v-if="isSupabaseEnabled()" class="flex items-center gap-2">
-    <template v-if="authReady && authUser">
+    <template v-if="authUser">
       <span class="hidden max-w-[10rem] truncate text-xs text-gray-500 sm:inline dark:text-gray-400" :title="authUser.email ?? ''">
         {{ authUser.email }}
       </span>
@@ -84,13 +84,14 @@ async function onSignOut() {
         退出
       </button>
     </template>
-    <template v-else-if="authReady">
+    <template v-else>
       <button
         type="button"
         class="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white dark:bg-blue-500 hover:bg-blue-700 dark:hover:bg-blue-600"
+        :disabled="!authReady"
         @click="open = true"
       >
-        登录
+        {{ authReady ? '登录' : '连接中...' }}
       </button>
     </template>
 
