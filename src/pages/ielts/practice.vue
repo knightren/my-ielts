@@ -1,7 +1,18 @@
 <script setup lang="ts" generic="T extends any, O extends any">
 import words from './listening179.json'
 
-const ws = reactive(words.map((v) => {
+type PracticeRow = (typeof words)[number] & {
+  form: {
+    word: string
+    replaceStr: string
+  }
+  result: {
+    checked: boolean
+    errorWords: string[]
+  }
+}
+
+const ws = reactive<PracticeRow[]>(words.map((v) => {
   const item = {
     ...v,
     form: {
@@ -16,7 +27,7 @@ const ws = reactive(words.map((v) => {
   return item
 }))
 
-function onKeydown(e, word) {
+function onKeydown(e: KeyboardEvent, word: string) {
   if (e.key === '`') {
     e.preventDefault()
     play(word)
@@ -41,7 +52,7 @@ function next(index: number) {
   const practiceReplace = cw.form.replaceStr.split(/[,，]/).map(v => v.trim().toLowerCase().replace(/\s+/g, ' '))
   // window.console.log(practiceReplace, practiceWord)
 
-  const errorWords = []
+  const errorWords: string[] = []
   if (practiceWord !== cw.word)
     errorWords.push(cw.word)
 

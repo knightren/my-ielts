@@ -68,6 +68,7 @@ const showMobileMenu = ref(false)
           </div>
         </div>
         <div class="flex items-center justify-between lg:order-2">
+          <AuthPanel class="mr-2" />
           <a
             href="https://github.com/hefengxian/my-ielts"
             target="_blank"

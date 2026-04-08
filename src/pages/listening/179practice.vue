@@ -1,5 +1,9 @@
 <script setup>
 import words from './listening179.json'
+import { requestProgressSync } from '~/composables/useAuth'
+import { touchProgressTimestamp } from '~/lib/progress-sync'
+
+const PRACTICE_STATE_KEY = 'listening_179_practice_state'
 
 const ws = reactive(words.map((v) => {
   const item = {
@@ -15,6 +19,47 @@ const ws = reactive(words.map((v) => {
   }
   return item
 }))
+
+function persistPracticeState() {
+  touchProgressTimestamp()
+  localStorage.setItem(PRACTICE_STATE_KEY, JSON.stringify(ws.map(item => ({
+    index: item.index,
+    form: item.form,
+    result: item.result,
+  }))))
+  requestProgressSync()
+}
+
+function loadPracticeState() {
+  const raw = localStorage.getItem(PRACTICE_STATE_KEY)
+  if (!raw)
+    return
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed))
+      return
+
+    const byIndex = new Map(parsed.map(item => [item.index, item]))
+    ws.forEach((item) => {
+      const stored = byIndex.get(item.index)
+      if (!stored || typeof stored !== 'object')
+        return
+      if (stored.form && typeof stored.form === 'object') {
+        item.form.word = typeof stored.form.word === 'string' ? stored.form.word : ''
+        item.form.replaceStr = typeof stored.form.replaceStr === 'string' ? stored.form.replaceStr : ''
+      }
+      if (stored.result && typeof stored.result === 'object') {
+        item.result.checked = Boolean(stored.result.checked)
+        item.result.errorWords = Array.isArray(stored.result.errorWords)
+          ? stored.result.errorWords.filter(v => typeof v === 'string')
+          : []
+      }
+    })
+  }
+  catch {
+  }
+}
 
 function onKeydown(e, word) {
   if (e.key === '`') {
@@ -50,6 +95,7 @@ function next(index) {
   }))
   cw.result.checked = true
   cw.result.errorWords = errorWords
+  persistPracticeState()
 
   // window.console.log(cw)
 
@@ -58,6 +104,14 @@ function next(index) {
   // 光标移动到下一个输入框
   document.getElementById(`input_${i + 1}`)?.focus()
 }
+
+watch(ws, () => {
+  persistPracticeState()
+}, { deep: true })
+
+onMounted(() => {
+  loadPracticeState()
+})
 </script>
 
 <template>

@@ -3,8 +3,11 @@ import baseChapterMap from './chapter-map'
 import listeningWords from '../listening/listening179.json'
 import keywordMarkdown from '../reading/538keyword.md?raw'
 import readingWords from '../reading/reading538words'
+import { requestProgressSync } from '~/composables/useAuth'
+import { touchProgressTimestamp } from '~/lib/progress-sync'
 
 const CHAPTER_KEY = 'vocabulary_typing_chapter'
+const PROGRESS_KEY = 'vocabulary_typing_progress'
 
 function normalizeReadingWord(word: string) {
   return word.replace(/\*/g, '').trim()
@@ -105,6 +108,38 @@ const wpm = ref(0)
 const accuracy = ref(100)
 const isFinished = ref(false)
 
+function persistProgress() {
+  touchProgressTimestamp()
+  localStorage.setItem(PROGRESS_KEY, JSON.stringify({
+    chapter: selectedChapter.value,
+    currentWordIndex: currentWordIndex.value,
+    isFinished: isFinished.value,
+  }))
+  requestProgressSync()
+}
+
+function loadProgress() {
+  const raw = localStorage.getItem(PROGRESS_KEY)
+  if (!raw)
+    return
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      chapter?: string
+      currentWordIndex?: number
+      isFinished?: boolean
+    }
+    if (parsed.chapter && chapterMap[parsed.chapter])
+      selectedChapter.value = parsed.chapter
+    if (Number.isInteger(parsed.currentWordIndex) && parsed.currentWordIndex! >= 0)
+      currentWordIndex.value = Math.min(parsed.currentWordIndex!, Math.max(words.value.length - 1, 0))
+    if (typeof parsed.isFinished === 'boolean')
+      isFinished.value = parsed.isFinished
+  }
+  catch {
+  }
+}
+
 const words = computed(() => {
   const chapter = chapterMap[selectedChapter.value]
   if (!chapter)
@@ -125,6 +160,7 @@ function displayChar(c: string) {
 watch(selectedChapter, (newVal) => {
   localStorage.setItem(CHAPTER_KEY, newVal)
   reset()
+  persistProgress()
 })
 
 watch(
@@ -142,6 +178,7 @@ function reset() {
   wpm.value = 0
   accuracy.value = 100
   isFinished.value = false
+  persistProgress()
   playAudio()
 }
 
@@ -206,15 +243,22 @@ function nextWord() {
     currentWordIndex.value++
     userInput.value = ''
     startTime.value = null
+    persistProgress()
     playAudio()
   }
   else {
     isFinished.value = true
+    persistProgress()
   }
 }
 
 onMounted(() => {
-  reset()
+  loadProgress()
+  userInput.value = ''
+  startTime.value = null
+  wpm.value = 0
+  accuracy.value = 100
+  playAudio()
 })
 </script>
 

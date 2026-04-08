@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import routes from 'virtual:generated-pages'
 import App from './App.vue'
+import { initAuth } from './composables/useAuth'
 
 import '@unocss/reset/tailwind.css'
 import './styles/main.css'
@@ -15,3 +16,4 @@ const router = createRouter({
 })
 app.use(router)
 app.mount('#app')
+void initAuth()

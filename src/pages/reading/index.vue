@@ -1,11 +1,13 @@
 <script setup>
 import keywordMarkdown from './538keyword.md?raw'
 import words from './reading538words'
+import { requestProgressSync } from '~/composables/useAuth'
+import { touchProgressTimestamp } from '~/lib/progress-sync'
 
 const ws = reactive(words)
 
 const activeTab = ref('keywords')
-const activeKeywordView = ref('list')
+const activeKeywordView = ref('flashcard')
 const planningDays = ref(7)
 const activePlanLabel = ref('')
 const activePlanWordKeys = ref([])
@@ -359,6 +361,9 @@ watch([filteredFlashcards, () => flashcardReviewOptions.shuffle], ([cards]) => {
 
 const dictionaryCache = new Map()
 const currentToastRequestId = ref(0)
+const currentFlashcardPhoneticRequestId = ref(0)
+const flashcardBackPhonetic = ref('')
+const flashcardBackPhoneticLoading = ref(false)
 const wordToast = reactive({
   visible: false,
   loading: false,
@@ -434,6 +439,14 @@ function persistFlashcardMemoryCounts() {
   if (typeof window === 'undefined')
     return
   window.localStorage.setItem(FLASHCARD_MEMORY_COUNT_STORAGE_KEY, JSON.stringify(flashcardMemoryCounts))
+}
+
+function persistReadingFlashcardState() {
+  touchProgressTimestamp()
+  persistFlashcardStatuses()
+  persistFlashcardReviewedAt()
+  persistFlashcardMemoryCounts()
+  requestProgressSync()
 }
 
 function loadFlashcardStatuses() {
@@ -608,12 +621,10 @@ function markFlashcard(status) {
 
   flashcardStatuses[card.statusKey] = status
   flashcardReviewedAt[card.statusKey] = getTodayKey()
-  if (status === 'known') {
+  if (status === 'known')
     flashcardMemoryCounts[card.statusKey] = getFlashcardMemoryCount(card.word) + 1
-    persistFlashcardMemoryCounts()
-  }
-  persistFlashcardStatuses()
-  persistFlashcardReviewedAt()
+
+  persistReadingFlashcardState()
 }
 
 function confirmFlashcardBack(isCorrect) {
@@ -638,9 +649,7 @@ function clearAllReadingFlashcardProgress() {
     delete flashcardReviewedAt[k]
   for (const k of Object.keys(flashcardMemoryCounts))
     delete flashcardMemoryCounts[k]
-  persistFlashcardStatuses()
-  persistFlashcardReviewedAt()
-  persistFlashcardMemoryCounts()
+  persistReadingFlashcardState()
   flashcardFlipped.value = false
   flashcardPretest.value = null
   clearAutoNextTimer()
@@ -911,37 +920,107 @@ function buildMemoryHint(meta) {
   const typeText = meta.type.toLowerCase()
   const lowerWord = word.toLowerCase()
 
-  const affixHints = [
-    { test: lowerWord.endsWith('tion') || lowerWord.endsWith('sion'), text: '看到词尾 -tion / -sion，先提醒自己它大概率是一个“名词结果/过程”。' },
-    { test: lowerWord.endsWith('ment'), text: '看到词尾 -ment，把它先当成“某种结果、状态或事物”来记。' },
-    { test: lowerWord.endsWith('ity'), text: '词尾 -ity 常把形容词变成抽象名词，适合和“性质、状态”联想。' },
-    { test: lowerWord.endsWith('ive'), text: '词尾 -ive 常见于形容词，先把它理解成“具有某种倾向或特征的”。' },
-    { test: lowerWord.endsWith('ous') || lowerWord.endsWith('ful'), text: '词尾本身就很像形容词信号，记忆时先把它放进“描述特征”的语境里。' },
-    { test: lowerWord.endsWith('ly'), text: '词尾 -ly 往往提示它和“方式、程度”有关，适合放进动作场景里记。' },
-    { test: lowerWord.startsWith('re'), text: '前缀 re- 常带“再、回、重新”的感觉，背的时候先抓这个方向。' },
-    { test: lowerWord.startsWith('inter'), text: '前缀 inter- 常有“在……之间、相互”的意思，可以联想到互动关系。' },
-    { test: lowerWord.startsWith('sub'), text: '前缀 sub- 常有“下、次级、再细分”的意味，记忆时先抓层级感。' },
-    { test: lowerWord.startsWith('trans'), text: '前缀 trans- 常有“传递、跨越、转移”的意思，适合联想变化或移动。' },
+  if (buildLookupTokens(word).length > 1)
+    return `先把 "${word}" 当成整块短语记，不要逐字拆散。先锁定整体义“${meaning}”，再看内部是不是熟词组合；如果能和同义替换 ${synonym || '或例句语境'} 对上，这个短语会更稳。`
+
+  const prefixRules = [
+    { match: 'inter', hint: 'inter- 常表示“在……之间、相互”' },
+    { match: 'trans', hint: 'trans- 常表示“跨越、转移、传递”' },
+    { match: 'super', hint: 'super- 常表示“上、超、过度”' },
+    { match: 'under', hint: 'under- 常表示“在下、不足”' },
+    { match: 'sub', hint: 'sub- 常表示“下、次级、细分”' },
+    { match: 'pre', hint: 'pre- 常表示“在前、预先”' },
+    { match: 'post', hint: 'post- 常表示“在后、之后”' },
+    { match: 're', hint: 're- 常表示“再、回、重新”' },
+    { match: 'un', hint: 'un- 常表示“否定、相反”' },
+    { match: 'in', hint: 'in- / im- / il- / ir- 常表示“否定”' },
+    { match: 'im', hint: 'in- / im- / il- / ir- 常表示“否定”' },
+    { match: 'il', hint: 'in- / im- / il- / ir- 常表示“否定”' },
+    { match: 'ir', hint: 'in- / im- / il- / ir- 常表示“否定”' },
+    { match: 'dis', hint: 'dis- 常表示“分开、否定、反向”' },
+    { match: 'mis', hint: 'mis- 常表示“错、坏、误”' },
+    { match: 'anti', hint: 'anti- 常表示“反对、对抗”' },
+    { match: 'pro', hint: 'pro- 常表示“向前、支持”' },
+    { match: 'con', hint: 'con- / com- / col- / cor- 常表示“共同、加强”' },
+    { match: 'com', hint: 'con- / com- / col- / cor- 常表示“共同、加强”' },
   ]
 
-  const matchedAffixHint = affixHints.find(item => item.test)?.text
+  const suffixRules = [
+    { match: 'ization', hint: '-ization 常表示“使……化的过程/结果”' },
+    { match: 'ation', hint: '-ation 常表示“动作、过程或结果”' },
+    { match: 'ition', hint: '-ition 常表示“动作、状态或结果”' },
+    { match: 'tion', hint: '-tion / -sion 常把词拉向“行为、结果、状态”名词' },
+    { match: 'sion', hint: '-tion / -sion 常把词拉向“行为、结果、状态”名词' },
+    { match: 'ment', hint: '-ment 常表示“结果、事物、状态”' },
+    { match: 'ness', hint: '-ness 常把形容词变成“性质、状态”名词' },
+    { match: 'ity', hint: '-ity 常表示“性质、特征、状态”' },
+    { match: 'ism', hint: '-ism 常表示“主义、现象、做法”' },
+    { match: 'ist', hint: '-ist 常表示“从事者、某类人”' },
+    { match: 'ship', hint: '-ship 常表示“关系、状态、身份”' },
+    { match: 'able', hint: '-able / -ible 常表示“能够……的、适合……的”' },
+    { match: 'ible', hint: '-able / -ible 常表示“能够……的、适合……的”' },
+    { match: 'ive', hint: '-ive 常见于形容词，表示“具有……倾向/性质”' },
+    { match: 'ous', hint: '-ous 常见于形容词，表示“充满……的、有……性质的”' },
+    { match: 'ful', hint: '-ful 常表示“充满……的”' },
+    { match: 'less', hint: '-less 常表示“没有、缺乏”' },
+    { match: 'al', hint: '-al 常把词变成“与……有关的”形容词' },
+    { match: 'ary', hint: '-ary 常表示“与……有关的、……性质的”' },
+    { match: 'ory', hint: '-ory 常表示“具有……性质的”' },
+    { match: 'ly', hint: '-ly 常见于副词，也可能是形容词尾，先判断它修饰动作还是描述性质' },
+  ]
 
-  if (buildLookupTokens(word).length > 1)
-    return `把 "${word}" 当成整块表达记，不要拆开死记。先抓住“${meaning}”这个整体意思，再回想它在例句里的使用场景。`
+  const rootRules = [
+    { match: 'spect', hint: '词根 spect 常和“看”有关' },
+    { match: 'vis', hint: '词根 vis / vid 常和“看”有关' },
+    { match: 'vid', hint: '词根 vis / vid 常和“看”有关' },
+    { match: 'dict', hint: '词根 dict 常和“说、表述”有关' },
+    { match: 'scribe', hint: '词根 scrib / script 常和“写”有关' },
+    { match: 'script', hint: '词根 scrib / script 常和“写”有关' },
+    { match: 'port', hint: '词根 port 常和“搬运、携带”有关' },
+    { match: 'tract', hint: '词根 tract 常和“拉、拖”有关' },
+    { match: 'struct', hint: '词根 struct 常和“建、构造”有关' },
+    { match: 'form', hint: '词根 form 常和“形状、形成”有关' },
+    { match: 'ject', hint: '词根 ject 常和“扔、投”有关' },
+    { match: 'gress', hint: '词根 gress 常和“走、前进”有关' },
+    { match: 'grad', hint: '词根 grad 常和“步、级、逐步”有关' },
+    { match: 'press', hint: '词根 press 常和“压、按”有关' },
+    { match: 'cede', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
+    { match: 'ceed', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
+    { match: 'cess', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
+    { match: 'mit', hint: '词根 mit / miss 常和“送、放出”有关' },
+    { match: 'miss', hint: '词根 mit / miss 常和“送、放出”有关' },
+    { match: 'pel', hint: '词根 pel / puls 常和“推、驱动”有关' },
+    { match: 'puls', hint: '词根 pel / puls 常和“推、驱动”有关' },
+    { match: 'rupt', hint: '词根 rupt 常和“断裂”有关' },
+    { match: 'tain', hint: '词根 tain / tent 常和“拿住、保持”有关' },
+    { match: 'tent', hint: '词根 tain / tent 常和“拿住、保持”有关' },
+    { match: 'cur', hint: '词根 cur / cour / curs 常和“跑、发生”有关' },
+    { match: 'cour', hint: '词根 cur / cour / curs 常和“跑、发生”有关' },
+    { match: 'curs', hint: '词根 cur / cour / curs 常和“跑、发生”有关' },
+  ]
 
-  if (matchedAffixHint)
-    return `${matchedAffixHint} 再把 ${word} 和“${meaning}”绑定${synonym ? `，顺手联想同义替换 ${synonym}` : ''}。`
+  const prefixHint = prefixRules.find(rule => lowerWord.startsWith(rule.match) && lowerWord.length - rule.match.length >= 3)?.hint
+  const suffixHint = suffixRules.find(rule => lowerWord.endsWith(rule.match) && lowerWord.length - rule.match.length >= 3)?.hint
+  const rootHint = rootRules.find(rule => lowerWord.includes(rule.match))?.hint
+  const structureHints = [prefixHint, rootHint, suffixHint].filter(Boolean)
+
+  if (structureHints.length) {
+    const helper = synonym
+      ? `再拿同义替换 ${synonym} 对照，看题目里通常是怎么改写它的。`
+      : '最后回到例句里，看它究竟落在什么语境里。'
+    return `${structureHints.join('；')}。背 ${word} 时，先沿着构词线索推到“${meaning}”，不要死背整串字母；${helper}`
+  }
 
   if (typeText.includes('v'))
-    return `把 ${word} 当成一个动作来记，先记“${meaning}”，再在脑中重放例句里“谁做了这个动作”。`
+    return `这个词更适合按“动作词”来记。先抓核心义“${meaning}”，再想是谁在做这个动作、动作指向谁；如果暂时拆不出词根词缀，就先用动作场景把它固定下来。`
 
   if (typeText.includes('adj'))
-    return `把 ${word} 当成“给名词贴标签”的描述词来记，先记“${meaning}”，再想它修饰的是哪类人或事物。`
+    return `把 ${word} 当成“给名词贴标签”的描述词记。先锁定它描述的特征“${meaning}”，再想它最常修饰哪类人、事物或现象。`
 
   if (typeText.includes('adv'))
-    return `把 ${word} 放进动作里记，重点感受它如何补充“怎么发生、到什么程度”。`
+    return `把 ${word} 放回动作里记，重点看它如何补充“怎么发生、到什么程度”。副词单独背容易飘，最好连同它常修饰的动词一起记。`
 
-  return `先把 ${word} 和“${meaning}”一对一绑定${synonym ? `，再用同义替换 ${synonym}` : ''}和例句一起复现这个词。`
+  return `如果暂时拆不出稳定词根词缀，就先把 ${word} 和“${meaning}”做一对一绑定${synonym ? `，再借助同义替换 ${synonym}` : ''}和例句场景反复复现。先保证会认，再慢慢补构词感觉。`
 }
 
 function createMetaFromRow(row) {
@@ -1104,6 +1183,46 @@ async function fetchDictionaryToken(token) {
 
   return dictionaryCache.get(key)
 }
+
+async function fetchPhoneticForRawWord(rawWord) {
+  const tokens = buildLookupTokens(rawWord)
+  if (!tokens.length)
+    return ''
+
+  const metas = await Promise.all(tokens.map(fetchDictionaryToken))
+  return metas
+    .map(meta => String(meta?.phonetic || '').replace(/^\/|\/$/g, '').trim())
+    .filter(Boolean)
+    .join(' / ')
+}
+
+async function loadCurrentFlashcardPhonetic() {
+  const rawWord = currentFlashcard.value?.rawWord || currentFlashcard.value?.word || ''
+  if (!rawWord) {
+    flashcardBackPhonetic.value = ''
+    flashcardBackPhoneticLoading.value = false
+    return
+  }
+
+  const requestId = currentFlashcardPhoneticRequestId.value + 1
+  currentFlashcardPhoneticRequestId.value = requestId
+  flashcardBackPhoneticLoading.value = true
+
+  const phonetic = await fetchPhoneticForRawWord(rawWord)
+  if (requestId !== currentFlashcardPhoneticRequestId.value)
+    return
+
+  flashcardBackPhonetic.value = phonetic
+  flashcardBackPhoneticLoading.value = false
+}
+
+watch(
+  () => currentFlashcard.value?.statusKey,
+  () => {
+    void loadCurrentFlashcardPhonetic()
+  },
+  { immediate: true },
+)
 
 async function showWordToast(meta, event) {
   const rawWord = meta.rawWord || meta.word
@@ -1571,7 +1690,7 @@ async function showWordToast(meta, event) {
           <div
             v-if="currentFlashcard"
             ref="flashcardFullscreenEl"
-            class="mx-auto max-w-3xl"
+            class="mx-auto max-w-6xl w-full"
             :class="isFlashcardFullscreen ? 'max-w-none h-full w-full flex flex-col justify-center bg-gray-950 px-4 py-6 sm:px-8' : ''"
           >
             <div class="mb-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-500 dark:text-gray-400" :class="isFlashcardFullscreen ? 'text-gray-300' : ''">
@@ -1709,6 +1828,9 @@ async function showWordToast(meta, event) {
                     <h4 class="mt-3 text-7xl leading-none font-bold text-gray-900 dark:text-white">
                       {{ currentFlashcard.word }}
                     </h4>
+                    <p class="phonetic-text mt-4 text-2xl font-medium text-sky-700 dark:text-sky-300">
+                      /{{ flashcardBackPhoneticLoading ? '...' : (flashcardBackPhonetic || '暂未查到') }}/
+                    </p>
                     <p class="mt-4 text-3xl text-gray-500 dark:text-gray-400">
                       {{ currentFlashcard.type }} · {{ currentFlashcard.meaning }}
                     </p>
@@ -2311,8 +2433,12 @@ async function showWordToast(meta, event) {
 </template>
 
 <style scoped>
+@import url('https://fonts.googleapis.com/css2?family=Gentium+Plus:wght@400;700&display=swap');
+
 .phonetic-text {
-  font-family: 'Times New Roman', 'Noto Sans', 'Segoe UI Symbol', 'Arial Unicode MS', serif;
+  font-family: 'Gentium Plus', 'Charis SIL', 'Doulos SIL', 'Times New Roman', 'Noto Sans', 'Segoe UI Symbol', 'Arial Unicode MS', serif;
   letter-spacing: 0.01em;
+  font-variant-ligatures: none;
+  font-feature-settings: 'liga' 0, 'clig' 0;
 }
 </style>
