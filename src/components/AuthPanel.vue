@@ -60,8 +60,12 @@ async function onSignUp() {
 
 async function onSignOut() {
   busy.value = true
+  localError.value = null
   try {
     await signOut()
+  }
+  catch (e) {
+    localError.value = e instanceof Error ? e.message : '退出失败'
   }
   finally {
     busy.value = false

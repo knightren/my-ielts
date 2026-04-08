@@ -112,8 +112,17 @@ export async function signUpWithEmail(email: string, password: string) {
 export async function signOut() {
   if (!supabase)
     return
+
+  authError.value = null
   stopPeriodicSync()
-  await supabase.auth.signOut()
+  const previousUser = authUser.value
+  authUser.value = null
+
+  const { error } = await supabase.auth.signOut()
+  if (error) {
+    authUser.value = previousUser
+    throw error
+  }
 }
 
 export function isSupabaseEnabled() {
