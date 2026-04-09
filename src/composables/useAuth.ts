@@ -9,6 +9,7 @@ export const authError = ref<string | null>(null)
 let syncTimer: ReturnType<typeof setInterval> | null = null
 let syncSoonTimer: ReturnType<typeof setTimeout> | null = null
 const SYNC_MS = 45_000
+const FORCE_SIGNED_OUT_KEY = 'supabase_force_signed_out'
 
 function clearSupabaseAuthStorage() {
   if (typeof window === 'undefined')
@@ -25,6 +26,24 @@ function clearSupabaseAuthStorage() {
     for (const key of keysToRemove)
       storage.removeItem(key)
   }
+}
+
+function markForceSignedOut() {
+  if (typeof window === 'undefined')
+    return
+  window.localStorage.setItem(FORCE_SIGNED_OUT_KEY, '1')
+}
+
+function clearForceSignedOut() {
+  if (typeof window === 'undefined')
+    return
+  window.localStorage.removeItem(FORCE_SIGNED_OUT_KEY)
+}
+
+function hasForceSignedOut(): boolean {
+  if (typeof window === 'undefined')
+    return false
+  return window.localStorage.getItem(FORCE_SIGNED_OUT_KEY) === '1'
 }
 
 function stopPeriodicSync() {
@@ -85,10 +104,23 @@ export async function initAuth() {
     return
   }
 
-  supabase.auth.onAuthStateChange(async (event, session) => {
+  const client = supabase
+
+  client.auth.onAuthStateChange(async (event, session) => {
     authUser.value = session?.user ?? null
 
     if (event === 'INITIAL_SESSION') {
+      if (hasForceSignedOut()) {
+        clearForceSignedOut()
+        if (session?.user) {
+          await client.auth.signOut({ scope: 'local' }).catch(() => {})
+          clearSupabaseAuthStorage()
+          authUser.value = null
+        }
+        authReady.value = true
+        return
+      }
+
       if (session?.user)
         await runSessionSync(session.user.id)
       authReady.value = true
@@ -112,6 +144,7 @@ export async function signInWithEmail(email: string, password: string) {
   if (!supabase)
     throw new Error('未配置 Supabase')
   authError.value = null
+  clearForceSignedOut()
   const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
   if (error)
     throw error
@@ -121,6 +154,7 @@ export async function signUpWithEmail(email: string, password: string) {
   if (!supabase)
     throw new Error('未配置 Supabase')
   authError.value = null
+  clearForceSignedOut()
   const { error } = await supabase.auth.signUp({ email: email.trim(), password })
   if (error)
     throw error
@@ -133,6 +167,7 @@ export async function signOut() {
   authError.value = null
   stopPeriodicSync()
   authUser.value = null
+  markForceSignedOut()
 
   const { error } = await supabase.auth.signOut({ scope: 'local' })
   clearSupabaseAuthStorage()
