@@ -5,10 +5,38 @@ import { requestProgressSync } from '~/composables/useAuth'
 import { touchProgressTimestamp } from '~/lib/progress-sync'
 
 const CHAPTER_KEY = 'vocabulary_chapter'
+const VOCABULARY_GOAL_MODE_KEY = 'vocabulary_goal_mode'
 const VOCABULARY_VIEW_KEY = 'vocabulary_view'
 const VOCABULARY_FLASHCARD_STATUS_KEY = 'vocabulary_flashcard_statuses'
 const VOCABULARY_FLASHCARD_REVIEWED_AT_KEY = 'vocabulary_flashcard_reviewed_at'
 const VOCABULARY_FLASHCARD_MEMORY_COUNT_KEY = 'vocabulary_flashcard_memory_counts'
+const VOCABULARY_FLASHCARD_MASTERED_AT_KEY = 'vocabulary_flashcard_mastered_at'
+const VOCABULARY_FLASHCARD_MASTERED_CHECK_COUNT_KEY = 'vocabulary_flashcard_mastered_check_counts'
+const VOCABULARY_EXAMPLE_TRANSLATIONS_KEY = 'vocabulary_example_translations'
+const BASE_VOCAB_SOURCE_NOTE = '来自《3000词汇表》，已按更易记忆的方式重新归类'
+const IELTS_65_CORE_THEME_CHAPTERS = [
+  '01_自然地理',
+  '03_动物保护',
+  '05_学校教育',
+  '06_科技发明',
+  '08_语言演化',
+  '12_饮食健康',
+  '13_建筑场所',
+  '14_交通旅行',
+  '15_国家政府',
+  '16_社会经济',
+  '17_法律法规',
+  '21_身心健康',
+]
+const IELTS_55_TO_65_BASE_KEEP_CHAPTERS = [
+  'B06_学校工作与商业',
+  'B07_社会法律与政府',
+  'B09_自然环境与动植物',
+  'B11_核心动作动词',
+  'B12_思维表达与社交',
+  'B13_核心描述形容词',
+  'B14_高频名词补充',
+]
 
 const isTrainingModel = ref(false)
 const isShowMeaning = ref(true)
@@ -17,6 +45,7 @@ const isOnlyShowErrors = ref(false)
 const isFinishTraining = ref(false)
 const isShowSource = ref(false)
 const activeView = ref(localStorage.getItem(VOCABULARY_VIEW_KEY) || 'flashcard')
+const vocabularyGoalMode = ref(localStorage.getItem(VOCABULARY_GOAL_MODE_KEY) || 'ielts-55-to-65')
 const planningDays = ref(7)
 const flashcardIndex = ref(0)
 const flashcardFlipped = ref(false)
@@ -26,13 +55,19 @@ const activePlanLabel = ref('')
 const activePlanWordKeys = ref([])
 const flashcardOrder = ref([])
 const flashcardReviewOptions = reactive({
-  reviewMode: 'all',
+  reviewMode: 'active',
   shuffle: false,
   autoNextAfterFlip: false,
 })
 const flashcardStatuses = reactive({})
 const flashcardReviewedAt = reactive({})
 const flashcardMemoryCounts = reactive({})
+const flashcardMasteredAt = reactive({})
+const flashcardMasteredCheckCounts = reactive({})
+const exampleTranslations = reactive({})
+const exampleTranslationVisible = reactive({})
+const exampleTranslationLoading = reactive({})
+const exampleTranslationErrors = reactive({})
 const flashcardFullscreenEl = ref(null)
 const isFlashcardFullscreen = ref(false)
 const dictionaryCache = new Map()
@@ -43,9 +78,46 @@ let autoNextTimer = null
 
 const trainingStats = ref('')
 const keyword = ref('')
-const chapters = Object.keys(chapterMap)
+const allChapters = Object.keys(chapterMap)
 const storedCategory = localStorage.getItem(CHAPTER_KEY)
-const category = ref(storedCategory && chapterMap[storedCategory] ? storedCategory : chapters[0])
+const visibleChapters = computed(() => {
+  if (vocabularyGoalMode.value === 'all')
+    return allChapters
+
+  if (vocabularyGoalMode.value === 'ielts-55-to-65') {
+    return allChapters.filter((chapterKey) => {
+      const chapter = chapterMap[chapterKey]
+      if (chapter?.source === 'base3000')
+        return IELTS_55_TO_65_BASE_KEEP_CHAPTERS.includes(chapterKey)
+      return IELTS_65_CORE_THEME_CHAPTERS.includes(chapterKey)
+    })
+  }
+
+  return allChapters.filter((chapterKey) => {
+    const chapter = chapterMap[chapterKey]
+    if (chapter?.source === 'base3000')
+      return true
+    return IELTS_65_CORE_THEME_CHAPTERS.includes(chapterKey)
+  })
+})
+const category = ref(
+  storedCategory && visibleChapters.value.includes(storedCategory)
+    ? storedCategory
+    : visibleChapters.value[0],
+)
+const vocabularyGoalSummary = computed(() => {
+  const visible = new Set(visibleChapters.value)
+  const totalWords = allChapters.reduce((sum, chapterKey) => {
+    if (!visible.has(chapterKey))
+      return sum
+    return sum + (chapterMap[chapterKey]?.words?.flat()?.length || 0)
+  }, 0)
+
+  return {
+    chapterCount: visibleChapters.value.length,
+    totalWords,
+  }
+})
 
 const loaded = ref(false)
 const refVocabulary = reactive(chapterMap)
@@ -87,8 +159,21 @@ watch(category, (newVal, oldVal) => {
   flashcardIndex.value = 0
   flashcardFlipped.value = false
   flashcardPretest.value = null
-  flashcardReviewOptions.reviewMode = 'all'
+  flashcardReviewOptions.reviewMode = 'active'
   clearAutoNextTimer()
+})
+
+watch(vocabularyGoalMode, (value) => {
+  localStorage.setItem(VOCABULARY_GOAL_MODE_KEY, value)
+  if (!visibleChapters.value.includes(category.value))
+    category.value = visibleChapters.value[0]
+})
+
+watch(visibleChapters, (chapters) => {
+  if (!chapters.length)
+    return
+  if (!chapters.includes(category.value))
+    category.value = chapters[0]
 })
 
 watch(activeView, (value) => {
@@ -119,8 +204,15 @@ const filteredFlashcards = computed(() => {
   const cards = flashcards.value
   if (flashcardReviewOptions.reviewMode === 'all')
     return cards
+  if (flashcardReviewOptions.reviewMode === 'active')
+    return cards.filter((card) => {
+      const status = getFlashcardStatus(card.statusKey)
+      return status !== 'mastered' || isFlashcardDueForMasteredCheck(card.statusKey)
+    })
   if (flashcardReviewOptions.reviewMode === 'unknown')
     return cards.filter(card => getFlashcardStatus(card.statusKey) === 'unknown')
+  if (flashcardReviewOptions.reviewMode === 'mastered')
+    return cards.filter(card => getFlashcardStatus(card.statusKey) === 'mastered')
   return cards.filter(card => !getFlashcardStatus(card.statusKey))
 })
 
@@ -142,42 +234,106 @@ const flashcardDeck = computed(() => {
 })
 
 const currentFlashcard = computed(() => flashcardDeck.value[flashcardIndex.value] || null)
+const currentMemoryAid = computed(() => getMemoryAid(currentFlashcard.value))
 
 const flashcardStats = computed(() => {
   const today = getTodayKey()
   const cards = flashcards.value
   const known = cards.filter(card => getFlashcardStatus(card.statusKey) === 'known').length
   const unknown = cards.filter(card => getFlashcardStatus(card.statusKey) === 'unknown').length
+  const masteredByUser = cards.filter(card => getFlashcardStatus(card.statusKey) === 'mastered').length
+  const masteredDue = cards.filter(card => isFlashcardDueForMasteredCheck(card.statusKey)).length
   const reviewedToday = cards.filter(card => flashcardReviewedAt[card.statusKey] === today).length
   const fivePlus = cards.filter(card => getFlashcardMemoryCount(card.statusKey) >= 5).length
   const tenPlus = cards.filter(card => getFlashcardMemoryCount(card.statusKey) >= 10).length
-  const mastered = cards.filter(card => getFlashcardMemoryCount(card.statusKey) >= 20).length
+  const overlearned = cards.filter(card => getFlashcardMemoryCount(card.statusKey) >= 20).length
 
   return {
     total: cards.length,
     known,
     unknown,
-    unmarked: cards.length - known - unknown,
+    masteredByUser,
+    masteredDue,
+    unmarked: cards.length - known - unknown - masteredByUser,
     reviewedToday,
     fivePlus,
     tenPlus,
-    mastered,
+    overlearned,
   }
 })
 
 const chapterPlanTarget = computed(() => currentChapter.value?.source === 'base3000' ? 10 : 8)
+const chapterSummaries = computed(() => {
+  return visibleChapters.value.map((chapterKey) => {
+    const words = refVocabulary[chapterKey]?.words?.flat() || []
+    let unfamiliar = 0
+    let reviewing = 0
+    let mastered = 0
+    let dueMastered = 0
+
+    words.forEach((item) => {
+      const statusKey = `${chapterKey}::${item.word[0].toLowerCase()}`
+      const status = getFlashcardStatus(statusKey)
+
+      if (status === 'mastered') {
+        mastered++
+        if (isFlashcardDueForMasteredCheck(statusKey))
+          dueMastered++
+        return
+      }
+
+      if (status === 'known') {
+        reviewing++
+        return
+      }
+
+      unfamiliar++
+    })
+
+    return {
+      key: chapterKey,
+      total: words.length,
+      unfamiliar,
+      reviewing,
+      mastered,
+      dueMastered,
+    }
+  })
+})
+
+const currentChapterSummary = computed(() => {
+  return chapterSummaries.value.find(item => item.key === category.value) || {
+    key: category.value,
+    total: 0,
+    unfamiliar: 0,
+    reviewing: 0,
+    mastered: 0,
+    dueMastered: 0,
+  }
+})
+
 const chapterPlan = computed(() => {
   const totalDays = Math.max(1, Math.min(60, Number(planningDays.value) || 7))
   const outstandingWords = chapterWords.value
-    .map(item => {
+    .map((item) => {
       const statusKey = `${category.value}::${item.word[0].toLowerCase()}`
+      const status = getFlashcardStatus(statusKey)
+      const isDueMastered = status === 'mastered' && isFlashcardDueForMasteredCheck(statusKey)
+
       return {
         ...item,
         statusKey,
-        remaining: Math.max(chapterPlanTarget.value - getFlashcardMemoryCount(statusKey), 0),
+        isDueMastered,
+        remaining: isDueMastered
+          ? 1
+          : Math.max(chapterPlanTarget.value - getFlashcardMemoryCount(statusKey), 0),
       }
     })
-    .filter(item => item.remaining > 0)
+    .filter((item) => {
+      if (item.isDueMastered)
+        return true
+      return item.remaining > 0 && getFlashcardStatus(item.statusKey) !== 'mastered'
+    })
 
   const chunks = Array.from({ length: totalDays }, () => [])
   outstandingWords.forEach((item, index) => {
@@ -245,8 +401,142 @@ function getTodayKey() {
   return new Date().toISOString().slice(0, 10)
 }
 
+function parseDateKey(value) {
+  if (typeof value !== 'string' || !value)
+    return null
+
+  const time = Date.parse(value)
+  return Number.isNaN(time) ? null : time
+}
+
+function getMasteredCheckCount(statusKey) {
+  const value = flashcardMasteredCheckCounts[statusKey]
+  return Number.isFinite(value) ? value : 0
+}
+
+function getMasteredReviewIntervalDays(statusKey) {
+  const checkCount = getMasteredCheckCount(statusKey)
+  if (checkCount <= 0)
+    return 7
+  if (checkCount === 1)
+    return 30
+  return 90
+}
+
+function isFlashcardDueForMasteredCheck(statusKey) {
+  if (getFlashcardStatus(statusKey) !== 'mastered')
+    return false
+
+  const masteredAt = parseDateKey(flashcardMasteredAt[statusKey])
+  if (!masteredAt)
+    return true
+
+  const intervalDays = getMasteredReviewIntervalDays(statusKey)
+  const nextCheckAt = masteredAt + intervalDays * 24 * 60 * 60 * 1000
+  return Date.now() >= nextCheckAt
+}
+
+function getMasteredReviewHint(statusKey) {
+  if (getFlashcardStatus(statusKey) !== 'mastered')
+    return ''
+
+  if (isFlashcardDueForMasteredCheck(statusKey))
+    return '熟词抽查已到期，建议现在核验一次。'
+
+  const intervalDays = getMasteredReviewIntervalDays(statusKey)
+  return `已进入熟词低频维护队列，下一次抽查间隔 ${intervalDays} 天。`
+}
+
 function normalizeWord(rawWord) {
   return String(rawWord || '').trim()
+}
+
+function normalizeVocabularyDisplayText(rawText) {
+  const text = String(rawText || '').trim()
+  if (!text || text === '-' || text === BASE_VOCAB_SOURCE_NOTE)
+    return ''
+  return text
+}
+
+function getVocabularyExampleText(item) {
+  return normalizeVocabularyDisplayText(item?.example)
+}
+
+function getVocabularyExtraText(item) {
+  return normalizeVocabularyDisplayText(item?.extra)
+}
+
+function getExampleTranslationKey(itemOrText) {
+  if (typeof itemOrText === 'string')
+    return normalizeVocabularyDisplayText(itemOrText)
+  return getVocabularyExampleText(itemOrText)
+}
+
+function getExampleTranslation(itemOrText) {
+  const key = getExampleTranslationKey(itemOrText)
+  return key ? exampleTranslations[key] || '' : ''
+}
+
+function isExampleTranslationVisible(itemOrText) {
+  const key = getExampleTranslationKey(itemOrText)
+  return key ? Boolean(exampleTranslationVisible[key]) : false
+}
+
+function isExampleTranslationLoading(itemOrText) {
+  const key = getExampleTranslationKey(itemOrText)
+  return key ? Boolean(exampleTranslationLoading[key]) : false
+}
+
+function getExampleTranslationError(itemOrText) {
+  const key = getExampleTranslationKey(itemOrText)
+  return key ? exampleTranslationErrors[key] || '' : ''
+}
+
+function persistExampleTranslations() {
+  localStorage.setItem(VOCABULARY_EXAMPLE_TRANSLATIONS_KEY, JSON.stringify(exampleTranslations))
+}
+
+async function fetchExampleTranslation(exampleText) {
+  const key = getExampleTranslationKey(exampleText)
+  if (!key || exampleTranslations[key] || exampleTranslationLoading[key])
+    return
+
+  exampleTranslationLoading[key] = true
+  exampleTranslationErrors[key] = ''
+
+  try {
+    const response = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=${encodeURIComponent(key)}`)
+    if (!response.ok)
+      throw new Error('translate_failed')
+
+    const data = await response.json()
+    const translated = Array.isArray(data?.[0])
+      ? data[0].map(part => String(part?.[0] || '')).join('').trim()
+      : ''
+
+    if (!translated)
+      throw new Error('empty_translation')
+
+    exampleTranslations[key] = translated
+    persistExampleTranslations()
+  }
+  catch {
+    exampleTranslationErrors[key] = '翻译获取失败，请稍后重试。'
+  }
+  finally {
+    exampleTranslationLoading[key] = false
+  }
+}
+
+async function toggleExampleTranslation(itemOrText) {
+  const key = getExampleTranslationKey(itemOrText)
+  if (!key)
+    return
+
+  const nextVisible = !exampleTranslationVisible[key]
+  exampleTranslationVisible[key] = nextVisible
+  if (nextVisible && !exampleTranslations[key])
+    await fetchExampleTranslation(key)
 }
 
 function buildLookupTokens(rawWord) {
@@ -254,6 +544,376 @@ function buildLookupTokens(rawWord) {
     .split(/\s+/)
     .map(token => token.trim())
     .filter(Boolean)
+}
+
+const MEMORY_AID_CHUNK_PRESETS = {
+  policy: 'public policy 公共政策',
+  budget: 'on a tight budget 预算紧张',
+  climate: 'climate change 气候变化',
+  environment: 'natural environment 自然环境',
+  government: 'local government 地方政府',
+  academic: 'academic vocabulary 学术词汇',
+  education: 'higher education 高等教育',
+  employment: 'job opportunities 就业机会',
+  research: 'carry out research 开展研究',
+  legal: 'legal advice 法律建议',
+  economy: 'economic growth 经济增长',
+  application: 'submit an application 提交申请',
+  appointment: 'make an appointment 预约',
+  conference: 'academic conference 学术会议',
+  contract: 'sign a contract 签合同',
+  degree: 'bachelor\'s degree 学士学位',
+  document: 'supporting documents 证明材料',
+  examination: 'sit an examination 参加考试',
+  institution: 'educational institution 教育机构',
+  organization: 'non-profit organization 非营利组织',
+  society: 'modern society 现代社会',
+  violence: 'domestic violence 家庭暴力',
+  atmosphere: 'upper atmosphere 高层大气',
+  global: 'global issue 全球性问题',
+  forest: 'rain forest 雨林',
+}
+
+const MEMORY_AID_FORMATION_PRESETS = {
+  transport: {
+    parts: [
+      { text: 'trans-', meaning: '跨越' },
+      { text: 'port', meaning: '搬运' },
+    ],
+    bridge: '跨着把东西搬到别处',
+  },
+  import: {
+    parts: [
+      { text: 'im-', meaning: '向内' },
+      { text: 'port', meaning: '搬运' },
+    ],
+    bridge: '把东西往里搬',
+  },
+  export: {
+    parts: [
+      { text: 'ex-', meaning: '向外' },
+      { text: 'port', meaning: '搬运' },
+    ],
+    bridge: '把东西往外运出去',
+  },
+  inspect: {
+    parts: [
+      { text: 'in-', meaning: '向内' },
+      { text: 'spect', meaning: '看' },
+    ],
+    bridge: '往里面仔细看',
+  },
+  respect: {
+    parts: [
+      { text: 're-', meaning: '回过来' },
+      { text: 'spect', meaning: '看' },
+    ],
+    bridge: '回过头认真看待别人',
+  },
+  construct: {
+    parts: [
+      { text: 'con-', meaning: '共同、聚在一起' },
+      { text: 'struct', meaning: '建造' },
+    ],
+    bridge: '把东西一起搭建起来',
+  },
+  destructive: {
+    parts: [
+      { text: 'de-', meaning: '拆开、向下' },
+      { text: 'struct', meaning: '结构、建造' },
+      { text: '-ive', meaning: '具有某种性质的' },
+    ],
+    bridge: '把原有结构拆掉',
+  },
+  employee: {
+    parts: [
+      { text: 'employ', meaning: '雇用、使用' },
+      { text: '-ee', meaning: '接受动作的人' },
+    ],
+    bridge: '被雇用的人',
+  },
+  unemployment: {
+    parts: [
+      { text: 'un-', meaning: '没有' },
+      { text: 'employ', meaning: '雇用、工作' },
+      { text: '-ment', meaning: '状态、结果' },
+    ],
+    bridge: '没有被雇用的状态',
+  },
+  employer: {
+    parts: [
+      { text: 'employ', meaning: '雇用、使用' },
+      { text: '-er', meaning: '做这个动作的人' },
+    ],
+    bridge: '雇用别人的一方',
+  },
+  education: {
+    parts: [
+      { text: 'educ', meaning: '引导、带出' },
+      { text: '-ation', meaning: '过程、结果' },
+    ],
+    bridge: '把能力一步步带出来的过程',
+  },
+  educational: {
+    parts: [
+      { text: 'educ', meaning: '引导、带出' },
+      { text: '-ation', meaning: '过程、结果' },
+      { text: '-al', meaning: '与……有关的' },
+    ],
+    bridge: '和教育这个过程有关的',
+  },
+  application: {
+    parts: [
+      { text: 'apply', meaning: '应用、使用、申请' },
+      { text: '-ation', meaning: '过程、结果' },
+    ],
+    bridge: '把申请或使用这件事落实成一个过程',
+  },
+  organization: {
+    parts: [
+      { text: 'organ', meaning: '器官、部分' },
+      { text: '-ize', meaning: '使成形、使有条理' },
+      { text: '-ation', meaning: '过程、结果' },
+    ],
+    bridge: '把各部分组织起来形成整体',
+  },
+  institution: {
+    parts: [
+      { text: 'in-', meaning: '进入、向内' },
+      { text: 'stit', meaning: '站立、建立' },
+      { text: '-tion', meaning: '结果、状态' },
+    ],
+    bridge: '把制度和结构立起来，形成正式机构',
+  },
+  economic: {
+    parts: [
+      { text: 'econom', meaning: '经济、管理家庭开支' },
+      { text: '-ic', meaning: '与……有关的' },
+    ],
+    bridge: '和经济运行有关的',
+  },
+  examination: {
+    parts: [
+      { text: 'ex-', meaning: '向外、彻底' },
+      { text: 'amin', meaning: '查看、检查' },
+      { text: '-ation', meaning: '过程、结果' },
+    ],
+    bridge: '把能力全面查验一遍',
+  },
+}
+
+const MEMORY_AID_PREFIX_RULES = [
+  { match: 'inter', meaning: '在……之间、相互' },
+  { match: 'trans', meaning: '跨越、转移' },
+  { match: 'super', meaning: '在上、超出' },
+  { match: 'under', meaning: '在下、不足' },
+  { match: 'sub', meaning: '下面、次级' },
+  { match: 'pre', meaning: '在前、预先' },
+  { match: 'post', meaning: '在后、之后' },
+  { match: 're', meaning: '再、回、重新' },
+  { match: 'un', meaning: '不、没有' },
+  { match: 'in', meaning: '不、向内' },
+  { match: 'im', meaning: '不、向内' },
+  { match: 'il', meaning: '不' },
+  { match: 'ir', meaning: '不' },
+  { match: 'dis', meaning: '分开、反向、不' },
+  { match: 'mis', meaning: '错误地' },
+  { match: 'anti', meaning: '反对' },
+  { match: 'pro', meaning: '向前、支持' },
+  { match: 'con', meaning: '共同、加强' },
+  { match: 'com', meaning: '共同、加强' },
+  { match: 'de', meaning: '向下、拆开、离开' },
+  { match: 'ex', meaning: '向外' },
+]
+
+const MEMORY_AID_SUFFIX_RULES = [
+  { match: 'ization', meaning: '……化的过程或结果' },
+  { match: 'ation', meaning: '过程、结果' },
+  { match: 'ition', meaning: '过程、结果' },
+  { match: 'tion', meaning: '行为、结果、状态' },
+  { match: 'sion', meaning: '行为、结果、状态' },
+  { match: 'ment', meaning: '状态、结果' },
+  { match: 'ness', meaning: '性质、状态' },
+  { match: 'ity', meaning: '性质、特征' },
+  { match: 'ize', meaning: '使……化、使成形' },
+  { match: 'ism', meaning: '主义、现象' },
+  { match: 'ist', meaning: '从事者、某类人' },
+  { match: 'ship', meaning: '关系、状态' },
+  { match: 'ee', meaning: '接受动作的人' },
+  { match: 'er', meaning: '做动作的人或物' },
+  { match: 'ic', meaning: '与……有关的' },
+  { match: 'able', meaning: '能够……的' },
+  { match: 'ible', meaning: '能够……的' },
+  { match: 'ive', meaning: '具有……性质的' },
+  { match: 'ous', meaning: '充满……的' },
+  { match: 'ful', meaning: '充满……的' },
+  { match: 'less', meaning: '没有……的' },
+  { match: 'al', meaning: '与……有关的' },
+  { match: 'ary', meaning: '与……有关的' },
+  { match: 'ory', meaning: '具有……性质的' },
+]
+
+const MEMORY_AID_ROOT_RULES = [
+  { match: 'spect', meaning: '看', bridge: '从“看”延伸到“仔细看、回看”' },
+  { match: 'vis', meaning: '看', bridge: '从“看”延伸到“看见、可见”' },
+  { match: 'vid', meaning: '看', bridge: '从“看”延伸到“看见、可见”' },
+  { match: 'dict', meaning: '说', bridge: '从“说出来”延伸到“表达、命令、说明”' },
+  { match: 'scribe', meaning: '写', bridge: '从“写下来”延伸到“记录、描述”' },
+  { match: 'script', meaning: '写', bridge: '从“写下来”延伸到“记录、描述”' },
+  { match: 'duc', meaning: '引导、带出', bridge: '从“引导出来”延伸到“教育、产生、引出”' },
+  { match: 'duct', meaning: '引导、带出', bridge: '从“引导出来”延伸到“教育、产生、引出”' },
+  { match: 'ploy', meaning: '使用、雇用', bridge: '从“使用某人做事”延伸到“雇用、就业”' },
+  { match: 'port', meaning: '搬运', bridge: '从“搬运”延伸到“运输、输入、输出”' },
+  { match: 'tract', meaning: '拉', bridge: '从“拉过去”延伸到“吸引、牵引”' },
+  { match: 'struct', meaning: '建造、结构', bridge: '从“搭建结构”延伸到“建造或破坏结构”' },
+  { match: 'organ', meaning: '器官、部分、组织', bridge: '从“各部分形成整体”延伸到“组织、机构”' },
+  { match: 'stit', meaning: '站立、建立', bridge: '从“立起来”延伸到“建立、设立”' },
+  { match: 'amin', meaning: '查看、检查', bridge: '从“仔细查看”延伸到“检查、考试”' },
+  { match: 'econom', meaning: '经济、管理开支', bridge: '从“管理家庭开支”延伸到“经济活动”' },
+  { match: 'form', meaning: '形状、形成', bridge: '从“形成形状”延伸到“形成、构成”' },
+  { match: 'ject', meaning: '扔、投', bridge: '从“扔出去”延伸到“投射、抛出”' },
+  { match: 'gress', meaning: '走、前进', bridge: '从“往前走”延伸到“进展、过程”' },
+  { match: 'grad', meaning: '步、级', bridge: '从“一级一级走”延伸到“程度、阶段”' },
+  { match: 'press', meaning: '压、按', bridge: '从“压下去”延伸到“施压、压迫”' },
+  { match: 'serve', meaning: '服务、提供', bridge: '从“提供服务”延伸到“服务、保存、保留”' },
+  { match: 'cede', meaning: '走、让', bridge: '从“走开或让出去”延伸到“让步、转让”' },
+  { match: 'ceed', meaning: '走、前进', bridge: '从“往前走”延伸到“继续、前进”' },
+  { match: 'cess', meaning: '走、让', bridge: '从“走开或让出去”延伸到“让步、转让”' },
+  { match: 'mit', meaning: '送、放出', bridge: '从“送出去”延伸到“提交、发出、允许”' },
+  { match: 'miss', meaning: '送、放出', bridge: '从“送出去”延伸到“发射、错过”' },
+  { match: 'rupt', meaning: '断裂', bridge: '从“断开”延伸到“打破、破裂”' },
+  { match: 'tain', meaning: '拿住、保持', bridge: '从“拿住”延伸到“保持、维持”' },
+  { match: 'tent', meaning: '拿住、伸展', bridge: '从“拿住或拉开”延伸到“保持、延伸”' },
+]
+
+function findMemoryAidChunk(extraText, lowerWord) {
+  const preset = MEMORY_AID_CHUNK_PRESETS[lowerWord]
+  if (preset)
+    return preset
+
+  if (!extraText)
+    return ''
+
+  const segments = extraText
+    .split(/[；;]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+
+  const matched = segments.find(segment => {
+    const englishPart = segment.match(/^[A-Za-z][A-Za-z' -]*/)
+    const phrase = englishPart?.[0]?.trim().toLowerCase() || ''
+    if (!phrase.includes(lowerWord))
+      return false
+    if (phrase === lowerWord)
+      return false
+    return phrase.includes(' ')
+  })
+
+  return matched || ''
+}
+
+function buildGenericFormationAid(lowerWord, meaning) {
+  const prefix = MEMORY_AID_PREFIX_RULES.find(rule => lowerWord.startsWith(rule.match) && lowerWord.length - rule.match.length >= 3)
+  const suffix = MEMORY_AID_SUFFIX_RULES.find(rule => lowerWord.endsWith(rule.match) && lowerWord.length - rule.match.length >= 3)
+  const root = MEMORY_AID_ROOT_RULES.find(rule => lowerWord.includes(rule.match))
+
+  if (!root)
+    return null
+
+  const parts = []
+  if (prefix)
+    parts.push({ text: `${prefix.match}-`, meaning: prefix.meaning })
+  parts.push({ text: root.match, meaning: root.meaning })
+  if (suffix)
+    parts.push({ text: `-${suffix.match}`, meaning: suffix.meaning })
+
+  const bridgeParts = []
+  if (prefix)
+    bridgeParts.push(prefix.meaning)
+  bridgeParts.push(root.meaning)
+  const bridge = `${root.bridge}；先从「${bridgeParts.join(' + ')}」想到这个方向，再引申到“${meaning}”。`
+
+  return {
+    type: 'formation',
+    title: '词根词缀',
+    parts,
+    bridge,
+    final: meaning,
+  }
+}
+
+function buildAssociationAid(card, lowerWord, meaning) {
+  const typeText = String(card?.pos || '').toLowerCase()
+  if (typeText.includes('v')) {
+    return {
+      type: 'association',
+      title: '联想',
+      content: `先把它放回一个动作场景里，直接记成“做出 ${meaning} 这个动作”。`,
+    }
+  }
+
+  if (typeText.includes('adj')) {
+    return {
+      type: 'association',
+      title: '联想',
+      content: `把它当成给事物贴的标签，看到词就想到“${meaning} 这种特征”。`,
+    }
+  }
+
+  return {
+    type: 'association',
+    title: '联想',
+    content: `先用一个最常见的使用场景记住它：${meaning}。`,
+  }
+}
+
+function getMemoryAid(card) {
+  if (!card) {
+    return {
+      type: 'association',
+      title: '联想',
+      content: '',
+    }
+  }
+
+  const word = normalizeWord(card.word?.[0])
+  const lowerWord = word.toLowerCase()
+  const meaning = String(card.meaning || '').split('；').filter(Boolean)[0] || '核心含义'
+  const extraText = getVocabularyExtraText(card)
+
+  if (buildLookupTokens(word).length > 1) {
+    return {
+      type: 'chunk',
+      title: '词块',
+      content: `${word} = ${meaning}`,
+    }
+  }
+
+  const presetFormation = MEMORY_AID_FORMATION_PRESETS[lowerWord]
+  if (presetFormation) {
+    return {
+      type: 'formation',
+      title: '词根词缀',
+      parts: presetFormation.parts,
+      bridge: `从「${presetFormation.parts.map(part => part.meaning).join(' + ')}」想到“${presetFormation.bridge}”，引申为“${meaning}”。`,
+      final: meaning,
+    }
+  }
+
+  const genericFormation = buildGenericFormationAid(lowerWord, meaning)
+  if (genericFormation)
+    return genericFormation
+
+  const chunk = findMemoryAidChunk(extraText, lowerWord)
+  if (chunk) {
+    return {
+      type: 'chunk',
+      title: '词块',
+      content: chunk,
+    }
+  }
+
+  return buildAssociationAid(card, lowerWord, meaning)
 }
 
 function buildFlashcardOrder(cards, currentKey = '') {
@@ -287,6 +947,8 @@ function persistFlashcardState() {
   localStorage.setItem(VOCABULARY_FLASHCARD_STATUS_KEY, JSON.stringify(flashcardStatuses))
   localStorage.setItem(VOCABULARY_FLASHCARD_REVIEWED_AT_KEY, JSON.stringify(flashcardReviewedAt))
   localStorage.setItem(VOCABULARY_FLASHCARD_MEMORY_COUNT_KEY, JSON.stringify(flashcardMemoryCounts))
+  localStorage.setItem(VOCABULARY_FLASHCARD_MASTERED_AT_KEY, JSON.stringify(flashcardMasteredAt))
+  localStorage.setItem(VOCABULARY_FLASHCARD_MASTERED_CHECK_COUNT_KEY, JSON.stringify(flashcardMasteredCheckCounts))
   requestProgressSync()
 }
 
@@ -295,6 +957,8 @@ function loadFlashcardState() {
     [VOCABULARY_FLASHCARD_STATUS_KEY, flashcardStatuses],
     [VOCABULARY_FLASHCARD_REVIEWED_AT_KEY, flashcardReviewedAt],
     [VOCABULARY_FLASHCARD_MEMORY_COUNT_KEY, flashcardMemoryCounts],
+    [VOCABULARY_FLASHCARD_MASTERED_AT_KEY, flashcardMasteredAt],
+    [VOCABULARY_FLASHCARD_MASTERED_CHECK_COUNT_KEY, flashcardMasteredCheckCounts],
   ]) {
     const raw = localStorage.getItem(key)
     if (!raw)
@@ -305,9 +969,26 @@ function loadFlashcardState() {
     catch {
     }
   }
+
+  const translationRaw = localStorage.getItem(VOCABULARY_EXAMPLE_TRANSLATIONS_KEY)
+  if (translationRaw) {
+    try {
+      Object.assign(exampleTranslations, JSON.parse(translationRaw))
+    }
+    catch {
+    }
+  }
 }
 
 function getMemoryStageMeta(statusKey, _chapterLabel = '') {
+  if (getFlashcardStatus(statusKey) === 'mastered') {
+    return {
+      key: 'mastered-by-user',
+      label: '熟词直过',
+      hint: getMasteredReviewHint(statusKey),
+      className: 'border-teal-200 bg-teal-50 text-teal-700 dark:border-teal-500/30 dark:bg-teal-500/10 dark:text-teal-300',
+    }
+  }
   const count = getFlashcardMemoryCount(statusKey)
   if (count >= 20) {
     return {
@@ -339,115 +1020,6 @@ function getMemoryStageMeta(statusKey, _chapterLabel = '') {
     hint: '继续记背，先冲到 5 次',
     className: 'border-gray-200 bg-gray-100 text-gray-600 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300',
   }
-}
-
-function buildMemoryHint(card) {
-  const word = normalizeWord(card.word?.[0])
-  const meaning = String(card.meaning || '').split('；').filter(Boolean)[0] || '核心含义'
-  const typeText = String(card.pos || '').toLowerCase()
-  const extraText = String(card.extra || '')
-  const lowerWord = word.toLowerCase()
-  const synonymMatch = extraText.match(/[A-Za-z][A-Za-z -]+/)
-  const synonym = synonymMatch?.[0]?.trim() || ''
-
-  if (buildLookupTokens(word).length > 1)
-    return `先把 "${word}" 当成整块短语记，不要逐字拆散。先锁定整体义“${meaning}”，再看内部是不是熟词组合；如果能和${synonym || '例句场景'}对上，这个短语会更稳。`
-
-  const prefixRules = [
-    { match: 'inter', hint: 'inter- 常表示“在……之间、相互”' },
-    { match: 'trans', hint: 'trans- 常表示“跨越、转移、传递”' },
-    { match: 'super', hint: 'super- 常表示“上、超、过度”' },
-    { match: 'under', hint: 'under- 常表示“在下、不足”' },
-    { match: 'sub', hint: 'sub- 常表示“下、次级、细分”' },
-    { match: 'pre', hint: 'pre- 常表示“在前、预先”' },
-    { match: 'post', hint: 'post- 常表示“在后、之后”' },
-    { match: 're', hint: 're- 常表示“再、回、重新”' },
-    { match: 'un', hint: 'un- 常表示“否定、相反”' },
-    { match: 'in', hint: 'in- / im- / il- / ir- 常表示“否定”' },
-    { match: 'im', hint: 'in- / im- / il- / ir- 常表示“否定”' },
-    { match: 'il', hint: 'in- / im- / il- / ir- 常表示“否定”' },
-    { match: 'ir', hint: 'in- / im- / il- / ir- 常表示“否定”' },
-    { match: 'dis', hint: 'dis- 常表示“分开、否定、反向”' },
-    { match: 'mis', hint: 'mis- 常表示“错、坏、误”' },
-    { match: 'anti', hint: 'anti- 常表示“反对、对抗”' },
-    { match: 'pro', hint: 'pro- 常表示“向前、支持”' },
-    { match: 'con', hint: 'con- / com- / col- / cor- 常表示“共同、加强”' },
-    { match: 'com', hint: 'con- / com- / col- / cor- 常表示“共同、加强”' },
-  ]
-
-  const suffixRules = [
-    { match: 'ization', hint: '-ization 常表示“使……化的过程/结果”' },
-    { match: 'ation', hint: '-ation 常表示“动作、过程或结果”' },
-    { match: 'ition', hint: '-ition 常表示“动作、状态或结果”' },
-    { match: 'tion', hint: '-tion / -sion 常把词拉向“行为、结果、状态”名词' },
-    { match: 'sion', hint: '-tion / -sion 常把词拉向“行为、结果、状态”名词' },
-    { match: 'ment', hint: '-ment 常表示“结果、事物、状态”' },
-    { match: 'ness', hint: '-ness 常把形容词变成“性质、状态”名词' },
-    { match: 'ity', hint: '-ity 常表示“性质、特征、状态”' },
-    { match: 'ism', hint: '-ism 常表示“主义、现象、做法”' },
-    { match: 'ist', hint: '-ist 常表示“从事者、某类人”' },
-    { match: 'ship', hint: '-ship 常表示“关系、状态、身份”' },
-    { match: 'able', hint: '-able / -ible 常表示“能够……的、适合……的”' },
-    { match: 'ible', hint: '-able / -ible 常表示“能够……的、适合……的”' },
-    { match: 'ive', hint: '-ive 常见于形容词，表示“具有……倾向/性质”' },
-    { match: 'ous', hint: '-ous 常见于形容词，表示“充满……的、有……性质的”' },
-    { match: 'ful', hint: '-ful 常表示“充满……的”' },
-    { match: 'less', hint: '-less 常表示“没有、缺乏”' },
-    { match: 'al', hint: '-al 常把词变成“与……有关的”形容词' },
-    { match: 'ary', hint: '-ary 常表示“与……有关的、……性质的”' },
-    { match: 'ory', hint: '-ory 常表示“具有……性质的”' },
-    { match: 'ly', hint: '-ly 常见于副词，也可能是形容词尾，先判断它修饰动作还是描述性质' },
-  ]
-
-  const rootRules = [
-    { match: 'spect', hint: '词根 spect 常和“看”有关' },
-    { match: 'vis', hint: '词根 vis / vid 常和“看”有关' },
-    { match: 'vid', hint: '词根 vis / vid 常和“看”有关' },
-    { match: 'dict', hint: '词根 dict 常和“说、表述”有关' },
-    { match: 'scribe', hint: '词根 scrib / script 常和“写”有关' },
-    { match: 'script', hint: '词根 scrib / script 常和“写”有关' },
-    { match: 'port', hint: '词根 port 常和“搬运、携带”有关' },
-    { match: 'tract', hint: '词根 tract 常和“拉、拖”有关' },
-    { match: 'struct', hint: '词根 struct 常和“建、构造”有关' },
-    { match: 'form', hint: '词根 form 常和“形状、形成”有关' },
-    { match: 'ject', hint: '词根 ject 常和“扔、投”有关' },
-    { match: 'gress', hint: '词根 gress 常和“走、前进”有关' },
-    { match: 'grad', hint: '词根 grad 常和“步、级、逐步”有关' },
-    { match: 'press', hint: '词根 press 常和“压、按”有关' },
-    { match: 'cede', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
-    { match: 'ceed', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
-    { match: 'cess', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
-    { match: 'mit', hint: '词根 mit / miss 常和“送、放出”有关' },
-    { match: 'miss', hint: '词根 mit / miss 常和“送、放出”有关' },
-    { match: 'pel', hint: '词根 pel / puls 常和“推、驱动”有关' },
-    { match: 'puls', hint: '词根 pel / puls 常和“推、驱动”有关' },
-    { match: 'rupt', hint: '词根 rupt 常和“断裂”有关' },
-    { match: 'tain', hint: '词根 tain / tent 常和“拿住、保持”有关' },
-    { match: 'tent', hint: '词根 tain / tent 常和“拿住、保持”有关' },
-  ]
-
-  const prefixHint = prefixRules.find(rule => lowerWord.startsWith(rule.match) && lowerWord.length - rule.match.length >= 3)?.hint
-  const suffixHint = suffixRules.find(rule => lowerWord.endsWith(rule.match) && lowerWord.length - rule.match.length >= 3)?.hint
-  const rootHint = rootRules.find(rule => lowerWord.includes(rule.match))?.hint
-  const structureHints = [prefixHint, rootHint, suffixHint].filter(Boolean)
-
-  if (structureHints.length) {
-    const helper = synonym
-      ? `再顺手联想补充里的 ${synonym}，确认它和原词的对应关系。`
-      : '最后回到例句里，看它究竟落在什么语境里。'
-    return `${structureHints.join('；')}。背 ${word} 时，先沿着构词线索推到“${meaning}”，不要死背整串字母；${helper}`
-  }
-
-  if (typeText.includes('v'))
-    return `这个词更适合按“动作词”来记。先抓核心义“${meaning}”，再想是谁在做这个动作、动作指向谁；如果暂时拆不出词根词缀，就先用动作场景把它固定下来。`
-
-  if (typeText.includes('adj'))
-    return `把 ${word} 当成“给名词贴标签”的描述词记。先锁定它描述的特征“${meaning}”，再想它最常修饰哪类人、事物或现象。`
-
-  if (typeText.includes('adv'))
-    return `把 ${word} 放回动作里记，重点看它如何补充“怎么发生、到什么程度”。副词单独背容易飘，最好连同它常修饰的动词一起记。`
-
-  return `如果暂时拆不出稳定词根词缀，就先把 ${word} 和“${meaning}”做一对一绑定${synonym ? `，再借助补充里的 ${synonym}` : ''}和例句场景反复复现。先保证会认，再慢慢补构词感觉。`
 }
 
 function extractDictionaryMeta(entries) {
@@ -583,6 +1155,44 @@ function markFlashcard(status) {
   flashcardReviewedAt[card.statusKey] = getTodayKey()
   if (status === 'known')
     flashcardMemoryCounts[card.statusKey] = getFlashcardMemoryCount(card.statusKey) + 1
+  if (status !== 'mastered') {
+    delete flashcardMasteredAt[card.statusKey]
+    delete flashcardMasteredCheckCounts[card.statusKey]
+  }
+  persistFlashcardState()
+}
+
+function markFlashcardMastered() {
+  const card = currentFlashcard.value
+  if (!card)
+    return
+  flashcardStatuses[card.statusKey] = 'mastered'
+  flashcardReviewedAt[card.statusKey] = getTodayKey()
+  flashcardMasteredAt[card.statusKey] = new Date().toISOString()
+  flashcardMasteredCheckCounts[card.statusKey] = getMasteredCheckCount(card.statusKey)
+  persistFlashcardState()
+  if (flashcardReviewOptions.autoNextAfterFlip)
+    scheduleAutoNext()
+}
+
+function confirmMasteredRetention(success) {
+  const card = currentFlashcard.value
+  if (!card)
+    return
+
+  flashcardReviewedAt[card.statusKey] = getTodayKey()
+  if (success) {
+    flashcardStatuses[card.statusKey] = 'mastered'
+    flashcardMasteredAt[card.statusKey] = new Date().toISOString()
+    flashcardMasteredCheckCounts[card.statusKey] = getMasteredCheckCount(card.statusKey) + 1
+    flashcardMemoryCounts[card.statusKey] = getFlashcardMemoryCount(card.statusKey) + 1
+  }
+  else {
+    flashcardStatuses[card.statusKey] = 'unknown'
+    delete flashcardMasteredAt[card.statusKey]
+    delete flashcardMasteredCheckCounts[card.statusKey]
+  }
+
   persistFlashcardState()
 }
 
@@ -590,7 +1200,9 @@ function markFlashcard(status) {
 function confirmFlashcardBack(isCorrect) {
   if (!currentFlashcard.value || !flashcardFlipped.value || flashcardPretest.value !== 'known')
     return
-  if (isCorrect)
+  if (getFlashcardStatus(currentFlashcard.value.statusKey) === 'mastered')
+    confirmMasteredRetention(isCorrect)
+  else if (isCorrect)
     markFlashcard('known')
   else
     markFlashcard('unknown')
@@ -609,6 +1221,10 @@ function clearAllVocabularyFlashcardProgress() {
     delete flashcardReviewedAt[k]
   for (const k of Object.keys(flashcardMemoryCounts))
     delete flashcardMemoryCounts[k]
+  for (const k of Object.keys(flashcardMasteredAt))
+    delete flashcardMasteredAt[k]
+  for (const k of Object.keys(flashcardMasteredCheckCounts))
+    delete flashcardMasteredCheckCounts[k]
   persistFlashcardState()
   flashcardFlipped.value = false
   flashcardPretest.value = null
@@ -659,7 +1275,7 @@ function startPlanFlashcards(day) {
   activePlanWordKeys.value = day.words.map(item => item.statusKey)
   activePlanLabel.value = `${category.value} · 第 ${day.dayNumber} 天任务`
   activeView.value = 'flashcard'
-  flashcardReviewOptions.reviewMode = 'all'
+  flashcardReviewOptions.reviewMode = 'active'
   flashcardReviewOptions.shuffle = true
   flashcardIndex.value = 0
   flashcardFlipped.value = false
@@ -669,7 +1285,7 @@ function startPlanFlashcards(day) {
 function clearPlanFlashcards() {
   activePlanWordKeys.value = []
   activePlanLabel.value = ''
-  flashcardReviewOptions.reviewMode = 'all'
+  flashcardReviewOptions.reviewMode = 'active'
 }
 
 function getFullscreenElement() {
@@ -769,6 +1385,12 @@ function handleVocabularyFlashcardKeydown(event) {
   if (event.key.toLowerCase() === 'r') {
     event.preventDefault()
     randomFlashcard()
+    return true
+  }
+
+  if (event.key.toLowerCase() === 'm') {
+    event.preventDefault()
+    markFlashcardMastered()
     return true
   }
 
@@ -934,6 +1556,36 @@ function copyAllError() {
         </div>
         <div class="items-center sm:flex">
           <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="rounded-full border px-3 py-1.5 text-xs font-medium transition"
+              :class="vocabularyGoalMode === 'ielts-55-to-65'
+                ? 'border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-500/30 dark:bg-cyan-500/10 dark:text-cyan-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="vocabularyGoalMode = 'ielts-55-to-65'"
+            >
+              5.5→6.5 冲刺词
+            </button>
+            <button
+              type="button"
+              class="rounded-full border px-3 py-1.5 text-xs font-medium transition"
+              :class="vocabularyGoalMode === 'ielts-65-core'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="vocabularyGoalMode = 'ielts-65-core'"
+            >
+              6.5 核心词
+            </button>
+            <button
+              type="button"
+              class="rounded-full border px-3 py-1.5 text-xs font-medium transition"
+              :class="vocabularyGoalMode === 'all'
+                ? 'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-500/30 dark:bg-slate-500/10 dark:text-slate-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="vocabularyGoalMode = 'all'"
+            >
+              全部词库
+            </button>
             <select
               v-model="category"
               class="block w-full flex-1 border border-gray-300 rounded-lg bg-gray-50 p-2.5 text-sm text-gray-900 dark:border-gray-600 focus:border-blue-500 dark:bg-gray-700 dark:text-white focus:ring-blue-500 dark:focus:border-blue-500 dark:focus:ring-blue-500 dark:placeholder-gray-400"
@@ -941,8 +1593,8 @@ function copyAllError() {
               <!-- <option value="">
                 全部章节
               </option> -->
-              <option v-for="(_, k) in refVocabulary" :key="k" :value="k">
-                {{ k }}
+              <option v-for="chapterKey in visibleChapters" :key="chapterKey" :value="chapterKey">
+                {{ chapterKey }}
               </option>
             </select>
             <button
@@ -1028,9 +1680,140 @@ function copyAllError() {
               {{
                 activeView === 'flashcard'
                   ? '点击橙色闪卡按钮后可进入强化记忆模式'
-                  : '按天拆分学习任务，照着执行即可'
+                  : activeView === 'plan'
+                    ? '按天拆分学习任务，照着执行即可'
+                    : ''
               }}
             </span>
+          </div>
+        </div>
+      </div>
+      <div class="mt-6 space-y-4">
+        <div class="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 dark:border-emerald-500/30 dark:bg-emerald-500/10">
+          <div class="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p class="text-xs font-semibold tracking-wide uppercase text-emerald-700 dark:text-emerald-300">
+                当前目标词库
+              </p>
+              <h4 class="mt-1 text-2xl font-bold text-gray-900 dark:text-white">
+                {{
+                  vocabularyGoalMode === 'ielts-55-to-65'
+                    ? '5.5 → 6.5 冲刺词'
+                    : vocabularyGoalMode === 'ielts-65-core'
+                      ? '雅思 6.5 核心词'
+                      : '全部词库'
+                }}
+              </h4>
+              <p class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+                {{
+                  vocabularyGoalMode === 'ielts-55-to-65'
+                    ? '基于 6.5 核心词再去掉一批明显基础词，默认更适合当前约 5.5 分、想节省复习时间的用户。'
+                    : vocabularyGoalMode === 'ielts-65-core'
+                    ? '保留全部基础词，并优先保留教育、科技、环境、社会、法律、健康等雅思高频主题词。'
+                    : '显示项目中的全部词表，包含核心词和扩展主题词。'
+                }}
+              </p>
+            </div>
+            <div class="text-sm text-gray-500 dark:text-gray-400">
+              {{ vocabularyGoalSummary.chapterCount }} 个词表 · {{ vocabularyGoalSummary.totalWords }} 个词
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-600 dark:bg-slate-900/40">
+          <div class="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p class="text-xs font-semibold tracking-wide uppercase text-slate-500 dark:text-slate-400">
+                当前词表概览
+              </p>
+              <h4 class="mt-1 text-2xl font-bold text-gray-900 dark:text-white">
+                {{ currentChapterSummary.key }}
+              </h4>
+              <p class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+                生词含未标记和不认识；复习中表示已认识但还在常规复习；熟词表示已进入低频维护。
+              </p>
+            </div>
+            <div class="text-sm text-gray-500 dark:text-gray-400">
+              共 {{ currentChapterSummary.total }} 个词
+            </div>
+          </div>
+          <div class="mt-4 grid gap-3 md:grid-cols-4">
+            <div class="rounded-xl bg-white px-4 py-3 text-sm shadow-sm dark:bg-slate-950/60">
+              <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">生词</p>
+              <p class="mt-1 text-lg font-semibold text-amber-700 dark:text-amber-300">{{ currentChapterSummary.unfamiliar }}</p>
+            </div>
+            <div class="rounded-xl bg-white px-4 py-3 text-sm shadow-sm dark:bg-slate-950/60">
+              <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">复习中</p>
+              <p class="mt-1 text-lg font-semibold text-blue-700 dark:text-blue-300">{{ currentChapterSummary.reviewing }}</p>
+            </div>
+            <div class="rounded-xl bg-white px-4 py-3 text-sm shadow-sm dark:bg-slate-950/60">
+              <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">熟词</p>
+              <p class="mt-1 text-lg font-semibold text-teal-700 dark:text-teal-300">{{ currentChapterSummary.mastered }}</p>
+            </div>
+            <div class="rounded-xl bg-white px-4 py-3 text-sm shadow-sm dark:bg-slate-950/60">
+              <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">待抽查熟词</p>
+              <p class="mt-1 text-lg font-semibold text-cyan-700 dark:text-cyan-300">{{ currentChapterSummary.dueMastered }}</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
+          <div class="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p class="text-xs font-semibold tracking-wide uppercase text-blue-600 dark:text-blue-400">
+                全部词表进度
+              </p>
+              <h4 class="mt-1 text-2xl font-bold text-gray-900 dark:text-white">
+                按词表查看积压
+              </h4>
+              <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                直接看当前目标词库里每个词表的生词、复习中和熟词数量，点击卡片可切换。
+              </p>
+            </div>
+          </div>
+
+          <div class="mt-4 grid gap-3 xl:grid-cols-4 lg:grid-cols-3 sm:grid-cols-2">
+            <button
+              v-for="summary in chapterSummaries"
+              :key="summary.key"
+              type="button"
+              class="rounded-2xl border p-4 text-left transition"
+              :class="summary.key === category
+                ? 'border-blue-300 bg-blue-50 shadow-sm dark:border-blue-500/40 dark:bg-blue-500/10'
+                : 'border-gray-200 bg-gray-50 hover:border-blue-200 hover:bg-blue-50/60 dark:border-gray-700 dark:bg-slate-900/40 dark:hover:border-blue-500/30 dark:hover:bg-blue-500/5'"
+              @click="category = summary.key"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-semibold text-gray-900 dark:text-white">
+                    {{ summary.key }}
+                  </p>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    共 {{ summary.total }} 个词
+                  </p>
+                </div>
+                <span
+                  v-if="summary.dueMastered"
+                  class="rounded-full bg-cyan-50 px-2 py-1 text-xs font-medium text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300"
+                >
+                  抽查 {{ summary.dueMastered }}
+                </span>
+              </div>
+              <div class="mt-4 grid grid-cols-3 gap-2 text-sm">
+                <div class="rounded-xl bg-amber-50 px-3 py-2 dark:bg-amber-500/10">
+                  <p class="text-[11px] uppercase tracking-wide text-amber-700 dark:text-amber-300">生词</p>
+                  <p class="mt-1 font-semibold text-amber-800 dark:text-amber-200">{{ summary.unfamiliar }}</p>
+                </div>
+                <div class="rounded-xl bg-blue-50 px-3 py-2 dark:bg-blue-500/10">
+                  <p class="text-[11px] uppercase tracking-wide text-blue-700 dark:text-blue-300">复习中</p>
+                  <p class="mt-1 font-semibold text-blue-800 dark:text-blue-200">{{ summary.reviewing }}</p>
+                </div>
+                <div class="rounded-xl bg-teal-50 px-3 py-2 dark:bg-teal-500/10">
+                  <p class="text-[11px] uppercase tracking-wide text-teal-700 dark:text-teal-300">熟词</p>
+                  <p class="mt-1 font-semibold text-teal-800 dark:text-teal-200">{{ summary.mastered }}</p>
+                </div>
+              </div>
+            </button>
           </div>
         </div>
       </div>
@@ -1145,7 +1928,6 @@ function copyAllError() {
                               :href="`https://dictionary.cambridge.org/dictionary/english-chinese-simplified/${w}`"
                             >{{ w }}</a>
                           </p>
-
                           <div
                             class="absolute right-0 top-0 hidden h-100% items-center group-hover:flex"
                             @click="copyText(item)"
@@ -1161,10 +1943,39 @@ function copyAllError() {
                         {{ isShowMeaning ? item.meaning : '' }}
                       </td>
                       <td class="p-4">
-                        {{ isTrainingModel ? '' : item.example }}
+                        <template v-if="!isTrainingModel && getVocabularyExampleText(item)">
+                          <p>
+                            {{ getVocabularyExampleText(item) }}
+                          </p>
+                          <button
+                            type="button"
+                            class="mt-2 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20"
+                            @click="toggleExampleTranslation(item)"
+                          >
+                            {{
+                              isExampleTranslationLoading(item)
+                                ? '翻译中...'
+                                : isExampleTranslationVisible(item)
+                                  ? '收起翻译'
+                                  : '翻译'
+                            }}
+                          </button>
+                          <p
+                            v-if="isExampleTranslationVisible(item) && getExampleTranslation(item)"
+                            class="mt-2 text-sm text-slate-600 dark:text-slate-300"
+                          >
+                            {{ getExampleTranslation(item) }}
+                          </p>
+                          <p
+                            v-else-if="isExampleTranslationVisible(item) && getExampleTranslationError(item)"
+                            class="mt-2 text-sm text-rose-600 dark:text-rose-300"
+                          >
+                            {{ getExampleTranslationError(item) }}
+                          </p>
+                        </template>
                       </td>
                       <td class="p-4">
-                        {{ isTrainingModel ? '' : item.extra }}
+                        {{ isTrainingModel ? '' : getVocabularyExtraText(item) }}
                       </td>
                     </tr>
                   </template>
@@ -1190,6 +2001,22 @@ function copyAllError() {
             </p>
             <p class="mt-1 text-lg font-semibold text-emerald-800 dark:text-emerald-200">
               {{ flashcardStats.known }}
+            </p>
+          </div>
+          <div class="rounded-xl bg-teal-50 px-4 py-3 text-sm dark:bg-teal-500/10">
+            <p class="text-xs tracking-wide uppercase text-teal-700 dark:text-teal-300">
+              主动标熟
+            </p>
+            <p class="mt-1 text-lg font-semibold text-teal-800 dark:text-teal-200">
+              {{ flashcardStats.masteredByUser }}
+            </p>
+          </div>
+          <div class="rounded-xl bg-cyan-50 px-4 py-3 text-sm dark:bg-cyan-500/10">
+            <p class="text-xs tracking-wide uppercase text-cyan-700 dark:text-cyan-300">
+              待抽查熟词
+            </p>
+            <p class="mt-1 text-lg font-semibold text-cyan-800 dark:text-cyan-200">
+              {{ flashcardStats.masteredDue }}
             </p>
           </div>
           <div class="rounded-xl bg-amber-50 px-4 py-3 text-sm dark:bg-amber-500/10">
@@ -1237,7 +2064,7 @@ function copyAllError() {
               烂熟于心
             </p>
             <p class="mt-1 text-lg font-semibold text-emerald-800 dark:text-emerald-200">
-              {{ flashcardStats.mastered }}
+              {{ flashcardStats.overlearned }}
             </p>
           </div>
         </div>
@@ -1246,8 +2073,18 @@ function copyAllError() {
           <button
             type="button"
             class="border rounded-full px-3 py-1 text-xs font-medium transition"
-            :class="flashcardReviewOptions.reviewMode === 'all'
+            :class="flashcardReviewOptions.reviewMode === 'active'
               ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+              : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+            @click="setReviewMode('active')"
+          >
+            常规复习
+          </button>
+          <button
+            type="button"
+            class="border rounded-full px-3 py-1 text-xs font-medium transition"
+            :class="flashcardReviewOptions.reviewMode === 'all'
+              ? 'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-500/30 dark:bg-slate-500/10 dark:text-slate-300'
               : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
             @click="setReviewMode('all')"
           >
@@ -1272,6 +2109,16 @@ function copyAllError() {
             @click="setReviewMode('unmarked')"
           >
             只复习“未标记”
+          </button>
+          <button
+            type="button"
+            class="border rounded-full px-3 py-1 text-xs font-medium transition"
+            :class="flashcardReviewOptions.reviewMode === 'mastered'
+              ? 'border-teal-200 bg-teal-50 text-teal-700 dark:border-teal-500/30 dark:bg-teal-500/10 dark:text-teal-300'
+              : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+            @click="setReviewMode('mastered')"
+          >
+            只看熟词
           </button>
           <button
             type="button"
@@ -1301,10 +2148,13 @@ function copyAllError() {
             清除闪卡学习记录
           </button>
           <span class="text-xs text-gray-500 dark:text-gray-400">
-            `U`=不认识并翻面且已自动记入不认识；正面 `K`=认识翻面后背面 `K`/`U` 选对错；`Space`/`Enter` 仅背面翻回正面；`←/→` 切卡，`R` 随机
+            `U`=不认识并翻面且已自动记入不认识；正面 `K`=认识翻面后背面 `K`/`U` 选对错；`M`=标熟词并默认跳过常规复习；`Space`/`Enter` 仅背面翻回正面；`←/→` 切卡，`R` 随机
           </span>
           <span class="text-xs text-gray-500 dark:text-gray-400">
             正面选「不认识」翻面即记入不认识；选「认识」后点「错」也会标记为不认识，可用「只复习不认识」筛选
+          </span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">
+            「常规复习」默认隐藏熟词，但到期抽查的熟词会自动回到队列；如需检查，可切到「只看熟词」或「全部单词」
           </span>
           <span class="text-xs text-gray-500 dark:text-gray-400">
             当前词库：{{ category }}
@@ -1337,6 +2187,8 @@ function copyAllError() {
                   ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
                   : getFlashcardStatus(currentFlashcard.statusKey) === 'unknown'
                     ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
+                    : getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'
+                      ? 'bg-teal-50 text-teal-700 dark:bg-teal-500/10 dark:text-teal-300'
                     : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
               >
                 {{
@@ -1344,8 +2196,19 @@ function copyAllError() {
                     ? '已标记：我认识'
                     : getFlashcardStatus(currentFlashcard.statusKey) === 'unknown'
                       ? '已标记：不认识'
+                      : getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'
+                        ? '已标记：熟词直过'
                       : '未标记'
                 }}
+              </span>
+              <span
+                v-if="getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'"
+                class="rounded-full px-3 py-1"
+                :class="isFlashcardDueForMasteredCheck(currentFlashcard.statusKey)
+                  ? 'bg-cyan-50 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300'
+                  : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'"
+              >
+                {{ isFlashcardDueForMasteredCheck(currentFlashcard.statusKey) ? '抽查到期' : '低频维护中' }}
               </span>
             </div>
             <div class="flex items-center gap-2">
@@ -1414,6 +2277,9 @@ function copyAllError() {
                 <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">K</kbd> 认识 → 翻面后需对照释义点「对/错」；
                 <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">U</kbd> 不认识 → 翻面即记入「不认识」，直接看释义即可
               </p>
+              <p v-if="getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'" class="mt-4 text-lg text-cyan-700 dark:text-cyan-300">
+                这张卡已在熟词队列中。到期时会回到常规复习做低频抽查。
+              </p>
               <div class="mt-8 flex flex-wrap items-center justify-center gap-4" @click.stop>
                 <button
                   type="button"
@@ -1431,9 +2297,17 @@ function copyAllError() {
                   不认识
                   <span class="mt-1 block text-sm font-normal opacity-70">U</span>
                 </button>
+                <button
+                  type="button"
+                  class="rounded-xl border-2 border-teal-200 bg-teal-50 px-8 py-4 text-2xl font-semibold text-teal-700 transition hover:border-teal-300 dark:border-teal-500/40 dark:bg-teal-500/15 dark:text-teal-200"
+                  @click="markFlashcardMastered"
+                >
+                  熟词直过
+                  <span class="mt-1 block text-sm font-normal opacity-70">M · 跳过常规复习</span>
+                </button>
               </div>
               <p class="mt-8 text-xl text-amber-600 dark:text-amber-400">
-                选认识后：背面用 <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">K</kbd>（对）/ <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">U</kbd>（错）；<kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">Space</kbd> 可翻回正面
+                选认识后：背面用 <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">K</kbd>（对）/ <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">U</kbd>（错）；<kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">M</kbd> 可直接标熟词；<kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">Space</kbd> 可翻回正面
               </p>
             </div>
 
@@ -1444,7 +2318,11 @@ function copyAllError() {
                     Flashcard Back
                   </p>
                   <p v-if="flashcardPretest === 'known'" class="mt-2 text-xl text-gray-600 dark:text-gray-300">
-                    你正面选了「认识」——请对照释义，用「对 / 错」判断回忆是否准确
+                    {{
+                      getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'
+                        ? '这是一次熟词抽查——请对照释义，用「对 / 错」判断是否仍能稳定回忆'
+                        : '你正面选了「认识」——请对照释义，用「对 / 错」判断回忆是否准确'
+                    }}
                   </p>
                   <p v-else class="mt-2 text-xl text-amber-800 dark:text-amber-200">
                     你已选「不认识」：已自动记入「不认识」，请认真阅读下方释义与例句
@@ -1471,6 +2349,9 @@ function copyAllError() {
                     <span class="text-lg text-gray-500 dark:text-gray-400">
                       {{ getMemoryStageMeta(currentFlashcard.statusKey, category).hint }}
                     </span>
+                    <span v-if="getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'" class="text-lg text-cyan-700 dark:text-cyan-300">
+                      已通过抽查 {{ getMasteredCheckCount(currentFlashcard.statusKey) }} 次
+                    </span>
                   </div>
                 </div>
                 <div class="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center" @click.stop>
@@ -1481,7 +2362,7 @@ function copyAllError() {
                       @click="confirmFlashcardBack(true)"
                     >
                       对
-                      <span class="mt-1 block text-sm font-normal opacity-80">与背面一致 → 我认识 · 快捷键 K</span>
+                      <span class="mt-1 block text-sm font-normal opacity-80">{{ getFlashcardStatus(currentFlashcard.statusKey) === 'mastered' ? '抽查通过 → 继续留在熟词队列 · 快捷键 K' : '与背面一致 → 我认识 · 快捷键 K' }}</span>
                     </button>
                     <button
                       type="button"
@@ -1489,9 +2370,17 @@ function copyAllError() {
                       @click="confirmFlashcardBack(false)"
                     >
                       错
-                      <span class="mt-1 block text-sm font-normal opacity-80">记错了 → 标记不认识 · 快捷键 U</span>
+                      <span class="mt-1 block text-sm font-normal opacity-80">{{ getFlashcardStatus(currentFlashcard.statusKey) === 'mastered' ? '抽查失败 → 降级为不认识并回到常规复习 · 快捷键 U' : '记错了 → 标记不认识 · 快捷键 U' }}</span>
                     </button>
                   </template>
+                  <button
+                    type="button"
+                    class="border border-teal-300 rounded-lg bg-teal-50 px-5 py-3 text-2xl font-semibold text-teal-800 dark:border-teal-500/40 dark:bg-teal-500/15 dark:text-teal-200 hover:bg-teal-100 dark:hover:bg-teal-500/25"
+                    @click="markFlashcardMastered"
+                  >
+                    标为熟词
+                    <span class="mt-1 block text-sm font-normal opacity-80">跳过常规复习 · 快捷键 M</span>
+                  </button>
                   <button
                     type="button"
                     class="i-carbon-volume-up-filled text-5xl text-gray-500 dark:text-gray-400 hover:text-blue-600"
@@ -1504,27 +2393,77 @@ function copyAllError() {
                 <div class="mt-8 space-y-7 text-3xl text-gray-700 dark:text-gray-200">
                 <div class="rounded-xl bg-blue-50 px-4 py-4 dark:bg-blue-500/10">
                   <p class="text-2xl font-medium tracking-wide uppercase text-blue-700 dark:text-blue-300">
-                    助记提示
+                    {{ currentMemoryAid.title }}
                   </p>
-                  <p class="mt-3 leading-[1.5] text-blue-900 dark:text-blue-100">
-                    {{ buildMemoryHint(currentFlashcard) }}
+                  <template v-if="currentMemoryAid.type === 'formation'">
+                    <div class="mt-3 space-y-3 text-blue-900 dark:text-blue-100">
+                      <div class="flex flex-wrap gap-2">
+                        <span
+                          v-for="part in currentMemoryAid.parts"
+                          :key="part.text"
+                          class="rounded-full bg-white/80 px-3 py-1 text-2xl font-medium dark:bg-slate-900/40"
+                        >
+                          {{ part.text }} = {{ part.meaning }}
+                        </span>
+                      </div>
+                      <p class="leading-[1.5]">
+                        {{ currentMemoryAid.bridge }}
+                      </p>
+                      <p class="text-2xl font-medium">
+                        词义：{{ currentMemoryAid.final }}
+                      </p>
+                    </div>
+                  </template>
+                  <p v-else class="mt-3 leading-[1.5] text-blue-900 dark:text-blue-100">
+                    {{ currentMemoryAid.content }}
                   </p>
                 </div>
-                <div>
-                  <p class="text-2xl font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
-                    例句
-                  </p>
+                <div @click.stop>
+                  <template v-if="getVocabularyExampleText(currentFlashcard)">
+                  <div class="flex flex-wrap items-center gap-3">
+                    <p class="text-2xl font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
+                      例句
+                    </p>
+                    <button
+                      type="button"
+                      class="rounded-md border border-blue-200 bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20"
+                      @click.stop="toggleExampleTranslation(currentFlashcard)"
+                    >
+                      {{
+                        isExampleTranslationLoading(currentFlashcard)
+                          ? '翻译中...'
+                          : isExampleTranslationVisible(currentFlashcard)
+                            ? '收起翻译'
+                            : '翻译'
+                      }}
+                    </button>
+                  </div>
                   <p class="mt-3 leading-[1.5]">
-                    {{ currentFlashcard.example || '暂未提供例句。' }}
+                    {{ getVocabularyExampleText(currentFlashcard) }}
                   </p>
+                  <p
+                    v-if="isExampleTranslationVisible(currentFlashcard) && getExampleTranslation(currentFlashcard)"
+                    class="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-[0.9em] text-slate-700 dark:bg-slate-800/70 dark:text-slate-200"
+                  >
+                    {{ getExampleTranslation(currentFlashcard) }}
+                  </p>
+                  <p
+                    v-else-if="isExampleTranslationVisible(currentFlashcard) && getExampleTranslationError(currentFlashcard)"
+                    class="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-[0.9em] text-rose-700 dark:bg-rose-500/10 dark:text-rose-300"
+                  >
+                    {{ getExampleTranslationError(currentFlashcard) }}
+                  </p>
+                  </template>
                 </div>
                 <div>
+                  <template v-if="getVocabularyExtraText(currentFlashcard)">
                   <p class="text-2xl font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
                     补充
                   </p>
                   <p class="mt-3 leading-[1.5]">
-                    {{ currentFlashcard.extra || '暂无补充。' }}
+                    {{ getVocabularyExtraText(currentFlashcard) }}
                   </p>
+                  </template>
                 </div>
               </div>
             </div>
@@ -1534,13 +2473,15 @@ function copyAllError() {
           当前筛选条件下没有可用单词，请调整章节或筛选后再试。
         </div>
       </div>
-      <div v-else class="mt-6 space-y-4">
+      <div v-else-if="activeView === 'plan'" class="mt-6 space-y-4">
         <div class="rounded-2xl border border-sky-200 bg-sky-50 p-5 dark:border-sky-500/30 dark:bg-sky-500/10">
           <div class="flex flex-wrap items-end justify-between gap-4">
             <div>
               <p class="text-xs font-semibold tracking-wide uppercase text-sky-700 dark:text-sky-300">Study Planner</p>
               <h4 class="mt-1 text-2xl font-bold text-gray-900 dark:text-white">{{ category }} 学习规划</h4>
               <p class="mt-2 text-sm text-gray-600 dark:text-gray-300">按天拆分这个词表的任务，并把每天任务直接送进闪卡模式。</p>
+              <p class="mt-2 text-sm text-teal-700 dark:text-teal-300">已标为熟词的单词默认不进入计划。</p>
+              <p class="mt-2 text-sm text-cyan-700 dark:text-cyan-300">但到期抽查的熟词会重新进入计划，每次按 1 次核验计算。</p>
             </div>
             <label class="flex items-center gap-3 text-sm text-gray-700 dark:text-gray-200">
               <span>计划天数</span>
@@ -1598,6 +2539,7 @@ function copyAllError() {
           </div>
         </div>
       </div>
+      
       <!-- Card Footer -->
       <div class="flex items-center justify-between pt-3 sm:pt-6">
         <div>

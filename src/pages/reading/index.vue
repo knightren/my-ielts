@@ -23,19 +23,28 @@ const flashcardIndex = ref(0)
 const flashcardFlipped = ref(false)
 const flashcardPretest = ref(null)
 const flashcardReviewOptions = reactive({
-  reviewMode: 'all',
+  reviewMode: 'active',
   shuffle: false,
   autoNextAfterFlip: false,
 })
 const flashcardStatuses = reactive({})
 const flashcardReviewedAt = reactive({})
 const flashcardMemoryCounts = reactive({})
+const flashcardMasteredAt = reactive({})
+const flashcardMasteredCheckCounts = reactive({})
+const exampleTranslations = reactive({})
+const exampleTranslationVisible = reactive({})
+const exampleTranslationLoading = reactive({})
+const exampleTranslationErrors = reactive({})
 const flashcardOrder = ref([])
 const flashcardFullscreenEl = ref(null)
 const isFlashcardFullscreen = ref(false)
 const FLASHCARD_STATUS_STORAGE_KEY = 'reading-538-flashcard-statuses'
 const FLASHCARD_REVIEWED_AT_STORAGE_KEY = 'reading-538-flashcard-reviewed-at'
 const FLASHCARD_MEMORY_COUNT_STORAGE_KEY = 'reading-538-flashcard-memory-counts'
+const FLASHCARD_MASTERED_AT_STORAGE_KEY = 'reading-538-flashcard-mastered-at'
+const FLASHCARD_MASTERED_CHECK_COUNT_STORAGE_KEY = 'reading-538-flashcard-mastered-check-counts'
+const FLASHCARD_EXAMPLE_TRANSLATIONS_STORAGE_KEY = 'reading-538-flashcard-example-translations'
 let autoNextTimer = null
 const scoreTable = [
   ['39-40', '9.0'],
@@ -222,10 +231,20 @@ const filteredFlashcards = computed(() => {
   if (flashcardReviewOptions.reviewMode === 'all')
     return cards
 
-  if (flashcardReviewOptions.reviewMode === 'unknown')
-    return cards.filter(card => getFlashcardStatus(card.word) === 'unknown')
+  if (flashcardReviewOptions.reviewMode === 'active') {
+    return cards.filter((card) => {
+      const status = getFlashcardStatus(card.statusKey)
+      return status !== 'mastered' || isFlashcardDueForMasteredCheck(card.statusKey)
+    })
+  }
 
-  return cards.filter(card => !getFlashcardStatus(card.word))
+  if (flashcardReviewOptions.reviewMode === 'unknown')
+    return cards.filter(card => getFlashcardStatus(card.statusKey) === 'unknown')
+
+  if (flashcardReviewOptions.reviewMode === 'mastered')
+    return cards.filter(card => getFlashcardStatus(card.statusKey) === 'mastered')
+
+  return cards.filter(card => !getFlashcardStatus(card.statusKey))
 })
 
 const flashcardDeck = computed(() => {
@@ -248,27 +267,32 @@ const flashcardDeck = computed(() => {
 const currentFlashcard = computed(() => {
   return flashcardDeck.value[flashcardIndex.value] || null
 })
+const currentMemoryAid = computed(() => getMemoryAid(currentFlashcard.value))
 
 const flashcardStats = computed(() => {
   const cards = searchedFlashcards.value
   const today = getTodayKey()
-  const known = cards.filter(card => getFlashcardStatus(card.word) === 'known').length
-  const unknown = cards.filter(card => getFlashcardStatus(card.word) === 'unknown').length
-  const unmarked = cards.length - known - unknown
+  const known = cards.filter(card => getFlashcardStatus(card.statusKey) === 'known').length
+  const unknown = cards.filter(card => getFlashcardStatus(card.statusKey) === 'unknown').length
+  const masteredByUser = cards.filter(card => getFlashcardStatus(card.statusKey) === 'mastered').length
+  const masteredDue = cards.filter(card => isFlashcardDueForMasteredCheck(card.statusKey)).length
+  const unmarked = cards.length - known - unknown - masteredByUser
   const reviewedToday = cards.filter(card => flashcardReviewedAt[card.statusKey] === today).length
-  const fivePlus = cards.filter(card => getFlashcardMemoryCount(card.word) >= 5).length
-  const tenPlus = cards.filter(card => getFlashcardMemoryCount(card.word) >= 10).length
-  const mastered = cards.filter(card => getFlashcardMemoryCount(card.word) >= 20).length
+  const fivePlus = cards.filter(card => getFlashcardMemoryCount(card.statusKey) >= 5).length
+  const tenPlus = cards.filter(card => getFlashcardMemoryCount(card.statusKey) >= 10).length
+  const overlearned = cards.filter(card => getFlashcardMemoryCount(card.statusKey) >= 20).length
 
   return {
     total: cards.length,
     known,
     unknown,
+    masteredByUser,
+    masteredDue,
     unmarked,
     reviewedToday,
     fivePlus,
     tenPlus,
-    mastered,
+    overlearned,
   }
 })
 
@@ -281,10 +305,19 @@ const keywordPlan = computed(() => {
       .map(row => ({
         index: row[0],
         word: row[1],
-        memoryCount: getFlashcardMemoryCount(row[1]),
-        remaining: Math.max(targetCount - getFlashcardMemoryCount(row[1]), 0),
+        statusKey: normalizeWord(row[1]).toLowerCase(),
+        memoryCount: getFlashcardMemoryCount(normalizeWord(row[1]).toLowerCase()),
+        remaining: Math.max(targetCount - getFlashcardMemoryCount(normalizeWord(row[1]).toLowerCase()), 0),
       }))
-      .filter(item => item.remaining > 0)
+      .filter((item) => {
+        if (getFlashcardStatus(item.statusKey) === 'mastered')
+          return isFlashcardDueForMasteredCheck(item.statusKey)
+        return item.remaining > 0
+      })
+      .map(item => ({
+        ...item,
+        remaining: getFlashcardStatus(item.statusKey) === 'mastered' ? 1 : item.remaining,
+      }))
 
     const chunks = Array.from({ length: totalDays }, () => [])
     outstandingWords.forEach((item, idx) => {
@@ -397,6 +430,53 @@ function getTodayKey() {
   return new Date().toISOString().slice(0, 10)
 }
 
+function getMasteredCheckCount(statusKey) {
+  const value = flashcardMasteredCheckCounts[statusKey]
+  return Number.isFinite(value) ? value : 0
+}
+
+function getMasteredReviewIntervalDays(statusKey) {
+  const checks = getMasteredCheckCount(statusKey)
+  if (checks <= 0)
+    return 7
+  if (checks === 1)
+    return 30
+  return 90
+}
+
+function getMasteredNextCheckAt(statusKey) {
+  const masteredAt = flashcardMasteredAt[statusKey]
+  if (!masteredAt)
+    return 0
+
+  const base = Date.parse(masteredAt)
+  if (Number.isNaN(base))
+    return 0
+
+  return base + getMasteredReviewIntervalDays(statusKey) * 24 * 60 * 60 * 1000
+}
+
+function isFlashcardDueForMasteredCheck(statusKey) {
+  if (getFlashcardStatus(statusKey) !== 'mastered')
+    return false
+
+  const nextCheckAt = getMasteredNextCheckAt(statusKey)
+  if (!nextCheckAt)
+    return true
+
+  return Date.now() >= nextCheckAt
+}
+
+function getMasteredReviewHint(statusKey) {
+  if (getFlashcardStatus(statusKey) !== 'mastered')
+    return ''
+
+  if (isFlashcardDueForMasteredCheck(statusKey))
+    return '熟词抽查已到期，建议现在核验一次。'
+
+  return `已进入熟词低频维护队列，下一次抽查间隔 ${getMasteredReviewIntervalDays(statusKey)} 天。`
+}
+
 function buildFlashcardOrder(cards, currentKey = '') {
   const keys = cards.map(card => card.statusKey)
   const remaining = keys.filter(key => key !== currentKey)
@@ -441,11 +521,25 @@ function persistFlashcardMemoryCounts() {
   window.localStorage.setItem(FLASHCARD_MEMORY_COUNT_STORAGE_KEY, JSON.stringify(flashcardMemoryCounts))
 }
 
+function persistFlashcardMasteredState() {
+  if (typeof window === 'undefined')
+    return
+  window.localStorage.setItem(FLASHCARD_MASTERED_AT_STORAGE_KEY, JSON.stringify(flashcardMasteredAt))
+  window.localStorage.setItem(FLASHCARD_MASTERED_CHECK_COUNT_STORAGE_KEY, JSON.stringify(flashcardMasteredCheckCounts))
+}
+
+function persistExampleTranslations() {
+  if (typeof window === 'undefined')
+    return
+  window.localStorage.setItem(FLASHCARD_EXAMPLE_TRANSLATIONS_STORAGE_KEY, JSON.stringify(exampleTranslations))
+}
+
 function persistReadingFlashcardState() {
   touchProgressTimestamp()
   persistFlashcardStatuses()
   persistFlashcardReviewedAt()
   persistFlashcardMemoryCounts()
+  persistFlashcardMasteredState()
   requestProgressSync()
 }
 
@@ -500,6 +594,45 @@ function loadFlashcardMemoryCounts() {
   }
 }
 
+function loadFlashcardMasteredState() {
+  if (typeof window === 'undefined')
+    return
+
+  for (const [storageKey, target] of [
+    [FLASHCARD_MASTERED_AT_STORAGE_KEY, flashcardMasteredAt],
+    [FLASHCARD_MASTERED_CHECK_COUNT_STORAGE_KEY, flashcardMasteredCheckCounts],
+  ]) {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw)
+      continue
+
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object')
+        Object.assign(target, parsed)
+    }
+    catch {
+    }
+  }
+}
+
+function loadExampleTranslations() {
+  if (typeof window === 'undefined')
+    return
+
+  const raw = window.localStorage.getItem(FLASHCARD_EXAMPLE_TRANSLATIONS_STORAGE_KEY)
+  if (!raw)
+    return
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object')
+      Object.assign(exampleTranslations, parsed)
+  }
+  catch {
+  }
+}
+
 function setKeywordView(view) {
   activeKeywordView.value = view
   flashcardFlipped.value = false
@@ -529,7 +662,7 @@ function startPlanFlashcards(day, task = null) {
     ? `第 ${day.dayNumber} 天 · ${task.title}`
     : `第 ${day.dayNumber} 天全部任务`
   activeKeywordView.value = 'flashcard'
-  flashcardReviewOptions.reviewMode = 'all'
+  flashcardReviewOptions.reviewMode = 'active'
   flashcardReviewOptions.shuffle = true
   flashcardCategoryFilter.value = task ? task.title : 'all'
   keyword.value = ''
@@ -622,7 +755,12 @@ function markFlashcard(status) {
   flashcardStatuses[card.statusKey] = status
   flashcardReviewedAt[card.statusKey] = getTodayKey()
   if (status === 'known')
-    flashcardMemoryCounts[card.statusKey] = getFlashcardMemoryCount(card.word) + 1
+    flashcardMemoryCounts[card.statusKey] = getFlashcardMemoryCount(card.statusKey) + 1
+
+  if (status !== 'mastered') {
+    delete flashcardMasteredAt[card.statusKey]
+    delete flashcardMasteredCheckCounts[card.statusKey]
+  }
 
   persistReadingFlashcardState()
 }
@@ -630,14 +768,39 @@ function markFlashcard(status) {
 function confirmFlashcardBack(isCorrect) {
   if (!currentFlashcard.value || !flashcardFlipped.value || flashcardPretest.value !== 'known')
     return
-  if (isCorrect)
+  if (getFlashcardStatus(currentFlashcard.value.statusKey) === 'mastered') {
+    if (isCorrect) {
+      flashcardMasteredAt[currentFlashcard.value.statusKey] = new Date().toISOString()
+      flashcardMasteredCheckCounts[currentFlashcard.value.statusKey] = getMasteredCheckCount(currentFlashcard.value.statusKey) + 1
+      flashcardReviewedAt[currentFlashcard.value.statusKey] = getTodayKey()
+      persistReadingFlashcardState()
+    }
+    else {
+      markFlashcard('unknown')
+    }
+  }
+  else if (isCorrect) {
     markFlashcard('known')
-  else
+  }
+  else {
     markFlashcard('unknown')
+  }
   if (flashcardReviewOptions.autoNextAfterFlip)
     scheduleAutoNext()
   else
     clearAutoNextTimer()
+}
+
+function markFlashcardMastered() {
+  const card = currentFlashcard.value
+  if (!card)
+    return
+
+  flashcardStatuses[card.statusKey] = 'mastered'
+  flashcardReviewedAt[card.statusKey] = getTodayKey()
+  flashcardMasteredAt[card.statusKey] = new Date().toISOString()
+  flashcardMasteredCheckCounts[card.statusKey] = 0
+  persistReadingFlashcardState()
 }
 
 function clearAllReadingFlashcardProgress() {
@@ -649,6 +812,10 @@ function clearAllReadingFlashcardProgress() {
     delete flashcardReviewedAt[k]
   for (const k of Object.keys(flashcardMemoryCounts))
     delete flashcardMemoryCounts[k]
+  for (const k of Object.keys(flashcardMasteredAt))
+    delete flashcardMasteredAt[k]
+  for (const k of Object.keys(flashcardMasteredCheckCounts))
+    delete flashcardMasteredCheckCounts[k]
   persistReadingFlashcardState()
   flashcardFlipped.value = false
   flashcardPretest.value = null
@@ -656,6 +823,15 @@ function clearAllReadingFlashcardProgress() {
 }
 
 function getMemoryStageMeta(word, category = '') {
+  if (getFlashcardStatus(word) === 'mastered') {
+    return {
+      key: 'mastered-by-user',
+      label: '熟词直过',
+      hint: getMasteredReviewHint(word),
+      className: 'border-teal-200 bg-teal-50 text-teal-700 dark:border-teal-500/30 dark:bg-teal-500/10 dark:text-teal-300',
+    }
+  }
+
   const count = getFlashcardMemoryCount(word)
 
   if (count >= 20) {
@@ -694,7 +870,7 @@ function getMemoryStageMeta(word, category = '') {
 }
 
 function getCategoryProgressSummary(category) {
-  const counts = category.words.map(row => getFlashcardMemoryCount(row[1]))
+  const counts = category.words.map(row => getFlashcardMemoryCount(normalizeWord(row[1]).toLowerCase()))
   return {
     total: counts.length,
     fivePlus: counts.filter(count => count >= 5).length,
@@ -831,6 +1007,12 @@ function handleFlashcardKeydown(event) {
   if (event.key.toLowerCase() === 'r') {
     event.preventDefault()
     randomFlashcard()
+    return
+  }
+
+  if (event.key.toLowerCase() === 'm') {
+    event.preventDefault()
+    markFlashcardMastered()
   }
 }
 
@@ -838,6 +1020,8 @@ onMounted(() => {
   loadFlashcardStatuses()
   loadFlashcardReviewedAt()
   loadFlashcardMemoryCounts()
+  loadFlashcardMasteredState()
+  loadExampleTranslations()
   syncFlashcardFullscreenState()
   window.addEventListener('keydown', handleFlashcardKeydown)
   document.addEventListener('fullscreenchange', syncFlashcardFullscreenState)
@@ -913,114 +1097,378 @@ function closeWordToast() {
   wordToast.visible = false
 }
 
-function buildMemoryHint(meta) {
+const MEMORY_AID_CHUNK_PRESETS = {
+  public: 'public transport 公共交通',
+  policy: 'public policy 公共政策',
+  climate: 'climate change 气候变化',
+  environment: 'natural environment 自然环境',
+  strategy: 'reading strategy 阅读策略',
+  research: 'research findings 研究结果',
+  evidence: 'supporting evidence 支持证据',
+  economy: 'economic growth 经济增长',
+  education: 'higher education 高等教育',
+  approach: 'alternative approach 替代方法',
+  rely: 'rely on 依靠',
+  adjust: 'adjust to 适应',
+  budget: 'budget constraints 预算限制',
+  adapt: 'adapt to 适应',
+  criteria: 'meet the criteria 达到标准',
+  curriculum: 'school curriculum 学校课程',
+  supplement: 'dietary supplement 营养补充剂',
+  limitation: 'time limitation 时间限制',
+  determine: 'determine whether 判定是否',
+  resemble: 'closely resemble 非常相似',
+}
+
+const MEMORY_AID_FORMATION_PRESETS = {
+  transport: {
+    parts: [
+      { text: 'trans-', meaning: '跨越' },
+      { text: 'port', meaning: '搬运' },
+    ],
+    bridge: '跨着把东西搬到别处',
+  },
+  import: {
+    parts: [
+      { text: 'im-', meaning: '向内' },
+      { text: 'port', meaning: '搬运' },
+    ],
+    bridge: '把东西往里搬',
+  },
+  export: {
+    parts: [
+      { text: 'ex-', meaning: '向外' },
+      { text: 'port', meaning: '搬运' },
+    ],
+    bridge: '把东西往外运出去',
+  },
+  inspect: {
+    parts: [
+      { text: 'in-', meaning: '向内' },
+      { text: 'spect', meaning: '看' },
+    ],
+    bridge: '往里面仔细看',
+  },
+  construct: {
+    parts: [
+      { text: 'con-', meaning: '共同、聚在一起' },
+      { text: 'struct', meaning: '建造' },
+    ],
+    bridge: '把东西一起搭建起来',
+  },
+  destructive: {
+    parts: [
+      { text: 'de-', meaning: '拆开、向下' },
+      { text: 'struct', meaning: '结构、建造' },
+      { text: '-ive', meaning: '具有某种性质的' },
+    ],
+    bridge: '把原有结构拆掉',
+  },
+  education: {
+    parts: [
+      { text: 'educ', meaning: '引导、带出' },
+      { text: '-ation', meaning: '过程、结果' },
+    ],
+    bridge: '把能力一步步带出来的过程',
+  },
+  employment: {
+    parts: [
+      { text: 'employ', meaning: '雇用、使用' },
+      { text: '-ment', meaning: '状态、结果' },
+    ],
+    bridge: '被雇用、在工作中的状态',
+  },
+  diversity: {
+    parts: [
+      { text: 'diverse', meaning: '不同的、多样的' },
+      { text: '-ity', meaning: '性质、状态' },
+    ],
+    bridge: '处于多种不同并存的状态',
+  },
+  limitation: {
+    parts: [
+      { text: 'limit', meaning: '界限、限制' },
+      { text: '-ation', meaning: '过程、结果' },
+    ],
+    bridge: '把范围界定住形成限制',
+  },
+  alternative: {
+    parts: [
+      { text: 'alter', meaning: '改变、另一个' },
+      { text: '-ative', meaning: '具有某种作用或性质的' },
+    ],
+    bridge: '可以拿来换用的另一个选择',
+  },
+  feasible: {
+    parts: [
+      { text: 'feas', meaning: '做、实现' },
+      { text: '-ible', meaning: '能够……的' },
+    ],
+    bridge: '能够做成、能够实现的',
+  },
+}
+
+const MEMORY_AID_PREFIX_RULES = [
+  { match: 'inter', meaning: '在……之间、相互' },
+  { match: 'trans', meaning: '跨越、转移' },
+  { match: 'super', meaning: '在上、超出' },
+  { match: 'under', meaning: '在下、不足' },
+  { match: 'sub', meaning: '下面、次级' },
+  { match: 'pre', meaning: '在前、预先' },
+  { match: 'post', meaning: '在后、之后' },
+  { match: 're', meaning: '再、回、重新' },
+  { match: 'un', meaning: '不、没有' },
+  { match: 'in', meaning: '不、向内' },
+  { match: 'im', meaning: '不、向内' },
+  { match: 'il', meaning: '不' },
+  { match: 'ir', meaning: '不' },
+  { match: 'dis', meaning: '分开、反向、不' },
+  { match: 'mis', meaning: '错误地' },
+  { match: 'anti', meaning: '反对' },
+  { match: 'pro', meaning: '向前、支持' },
+  { match: 'con', meaning: '共同、加强' },
+  { match: 'com', meaning: '共同、加强' },
+  { match: 'de', meaning: '向下、拆开、离开' },
+  { match: 'ex', meaning: '向外' },
+]
+
+const MEMORY_AID_SUFFIX_RULES = [
+  { match: 'ization', meaning: '……化的过程或结果' },
+  { match: 'ation', meaning: '过程、结果' },
+  { match: 'ition', meaning: '过程、结果' },
+  { match: 'tion', meaning: '行为、结果、状态' },
+  { match: 'sion', meaning: '行为、结果、状态' },
+  { match: 'ment', meaning: '状态、结果' },
+  { match: 'ness', meaning: '性质、状态' },
+  { match: 'ity', meaning: '性质、特征' },
+  { match: 'ize', meaning: '使……化、使成形' },
+  { match: 'ism', meaning: '主义、现象' },
+  { match: 'ist', meaning: '从事者、某类人' },
+  { match: 'ship', meaning: '关系、状态' },
+  { match: 'ee', meaning: '接受动作的人' },
+  { match: 'er', meaning: '做动作的人或物' },
+  { match: 'ic', meaning: '与……有关的' },
+  { match: 'able', meaning: '能够……的' },
+  { match: 'ible', meaning: '能够……的' },
+  { match: 'ive', meaning: '具有……性质的' },
+  { match: 'ative', meaning: '具有……作用或性质的' },
+  { match: 'ous', meaning: '充满……的' },
+  { match: 'ful', meaning: '充满……的' },
+  { match: 'less', meaning: '没有……的' },
+  { match: 'al', meaning: '与……有关的' },
+  { match: 'ary', meaning: '与……有关的' },
+  { match: 'ory', meaning: '具有……性质的' },
+]
+
+const MEMORY_AID_ROOT_RULES = [
+  { match: 'spect', meaning: '看', bridge: '从“看”延伸到“仔细看、回看”' },
+  { match: 'vis', meaning: '看', bridge: '从“看”延伸到“看见、可见”' },
+  { match: 'vid', meaning: '看', bridge: '从“看”延伸到“看见、可见”' },
+  { match: 'dict', meaning: '说', bridge: '从“说出来”延伸到“表达、命令、说明”' },
+  { match: 'scribe', meaning: '写', bridge: '从“写下来”延伸到“记录、描述”' },
+  { match: 'script', meaning: '写', bridge: '从“写下来”延伸到“记录、描述”' },
+  { match: 'duc', meaning: '引导、带出', bridge: '从“引导出来”延伸到“教育、产生、引出”' },
+  { match: 'duct', meaning: '引导、带出', bridge: '从“引导出来”延伸到“教育、产生、引出”' },
+  { match: 'ploy', meaning: '使用、雇用', bridge: '从“使用某人做事”延伸到“雇用、就业”' },
+  { match: 'port', meaning: '搬运', bridge: '从“搬运”延伸到“运输、输入、输出”' },
+  { match: 'tract', meaning: '拉', bridge: '从“拉过去”延伸到“吸引、牵引”' },
+  { match: 'struct', meaning: '建造、结构', bridge: '从“搭建结构”延伸到“建造或破坏结构”' },
+  { match: 'alter', meaning: '改变、另一个', bridge: '从“变成另一个”延伸到“替代、替换”' },
+  { match: 'limit', meaning: '界限、边界', bridge: '从“画出边界”延伸到“限制范围”' },
+  { match: 'feas', meaning: '做、实现', bridge: '从“做得成”延伸到“可行、可实现”' },
+  { match: 'cogn', meaning: '知道、认出', bridge: '从“知道、认出来”延伸到“识别、认知”' },
+  { match: 'sembl', meaning: '相似、像', bridge: '从“看起来像”延伸到“相似、类似”' },
+  { match: 'crit', meaning: '判断、标准', bridge: '从“作出判断”延伸到“标准、准则”' },
+  { match: 'curr', meaning: '跑、流动', bridge: '从“流动、运行”延伸到“课程流程、进程”' },
+  { match: 'form', meaning: '形状、形成', bridge: '从“形成形状”延伸到“形成、构成”' },
+  { match: 'ject', meaning: '扔、投', bridge: '从“扔出去”延伸到“投射、抛出”' },
+  { match: 'gress', meaning: '走、前进', bridge: '从“往前走”延伸到“进展、过程”' },
+  { match: 'grad', meaning: '步、级', bridge: '从“一级一级走”延伸到“程度、阶段”' },
+  { match: 'press', meaning: '压、按', bridge: '从“压下去”延伸到“施压、压迫”' },
+  { match: 'serve', meaning: '服务、提供', bridge: '从“提供服务”延伸到“服务、保存、保留”' },
+  { match: 'cede', meaning: '走、让', bridge: '从“走开或让出去”延伸到“让步、转让”' },
+  { match: 'ceed', meaning: '走、前进', bridge: '从“往前走”延伸到“继续、前进”' },
+  { match: 'cess', meaning: '走、让', bridge: '从“走开或让出去”延伸到“让步、转让”' },
+  { match: 'mit', meaning: '送、放出', bridge: '从“送出去”延伸到“提交、发出、允许”' },
+  { match: 'miss', meaning: '送、放出', bridge: '从“送出去”延伸到“发射、错过”' },
+  { match: 'rupt', meaning: '断裂', bridge: '从“断开”延伸到“打破、破裂”' },
+  { match: 'tain', meaning: '拿住、保持', bridge: '从“拿住”延伸到“保持、维持”' },
+  { match: 'tent', meaning: '拿住、伸展', bridge: '从“拿住或拉开”延伸到“保持、延伸”' },
+  { match: 'cur', meaning: '跑、发生', bridge: '从“跑动或发生”延伸到“过程、发生、当前”' },
+  { match: 'cour', meaning: '跑、发生', bridge: '从“跑动或发生”延伸到“过程、发生、当前”' },
+  { match: 'curs', meaning: '跑、发生', bridge: '从“跑动或发生”延伸到“过程、发生、当前”' },
+]
+
+function getExampleText(meta) {
+  return String(meta?.example || '').trim()
+}
+
+function getExampleTranslationKey(metaOrText) {
+  if (typeof metaOrText === 'string')
+    return String(metaOrText || '').trim()
+  return getExampleText(metaOrText)
+}
+
+function getExampleTranslation(metaOrText) {
+  const key = getExampleTranslationKey(metaOrText)
+  return key ? exampleTranslations[key] || '' : ''
+}
+
+function getExampleTranslationError(metaOrText) {
+  const key = getExampleTranslationKey(metaOrText)
+  return key ? exampleTranslationErrors[key] || '' : ''
+}
+
+function isExampleTranslationVisible(metaOrText) {
+  const key = getExampleTranslationKey(metaOrText)
+  return key ? Boolean(exampleTranslationVisible[key]) : false
+}
+
+function isExampleTranslationLoading(metaOrText) {
+  const key = getExampleTranslationKey(metaOrText)
+  return key ? Boolean(exampleTranslationLoading[key]) : false
+}
+
+async function fetchExampleTranslation(exampleText) {
+  const key = getExampleTranslationKey(exampleText)
+  if (!key || exampleTranslations[key] || exampleTranslationLoading[key])
+    return
+
+  exampleTranslationLoading[key] = true
+  exampleTranslationErrors[key] = ''
+
+  try {
+    const response = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=${encodeURIComponent(key)}`)
+    if (!response.ok)
+      throw new Error('translate_failed')
+
+    const data = await response.json()
+    const translated = Array.isArray(data?.[0])
+      ? data[0].map(part => String(part?.[0] || '')).join('').trim()
+      : ''
+
+    if (!translated)
+      throw new Error('empty_translation')
+
+    exampleTranslations[key] = translated
+    persistExampleTranslations()
+  }
+  catch {
+    exampleTranslationErrors[key] = '翻译获取失败，请稍后重试。'
+  }
+  finally {
+    exampleTranslationLoading[key] = false
+  }
+}
+
+async function toggleExampleTranslation(metaOrText) {
+  const key = getExampleTranslationKey(metaOrText)
+  if (!key)
+    return
+
+  const nextVisible = !exampleTranslationVisible[key]
+  exampleTranslationVisible[key] = nextVisible
+  if (nextVisible && !exampleTranslations[key])
+    await fetchExampleTranslation(key)
+}
+
+function findMemoryAidChunk(meta, lowerWord) {
+  const preset = MEMORY_AID_CHUNK_PRESETS[lowerWord]
+  if (preset)
+    return preset
+
+  const candidates = [...(meta?.synonyms || []), meta?.note || '']
+    .join('；')
+    .split(/[；;,]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+
+  return candidates.find((item) => {
+    const phrase = item.toLowerCase()
+    if (!phrase.includes(lowerWord))
+      return false
+    if (phrase === lowerWord)
+      return false
+    return phrase.includes(' ')
+  }) || ''
+}
+
+function buildGenericFormationAid(lowerWord, meaning) {
+  const prefix = MEMORY_AID_PREFIX_RULES.find(rule => lowerWord.startsWith(rule.match) && lowerWord.length - rule.match.length >= 3)
+  const suffix = MEMORY_AID_SUFFIX_RULES.find(rule => lowerWord.endsWith(rule.match) && lowerWord.length - rule.match.length >= 3)
+  const root = MEMORY_AID_ROOT_RULES.find(rule => lowerWord.includes(rule.match))
+
+  if (!root)
+    return null
+
+  const parts = []
+  if (prefix)
+    parts.push({ text: `${prefix.match}-`, meaning: prefix.meaning })
+  parts.push({ text: root.match, meaning: root.meaning })
+  if (suffix)
+    parts.push({ text: `-${suffix.match}`, meaning: suffix.meaning })
+
+  const bridgeParts = []
+  if (prefix)
+    bridgeParts.push(prefix.meaning)
+  bridgeParts.push(root.meaning)
+
+  return {
+    type: 'formation',
+    title: '词根词缀',
+    parts,
+    bridge: `${root.bridge}；先从「${bridgeParts.join(' + ')}」想到这个方向，再引申到“${meaning}”。`,
+    final: meaning,
+  }
+}
+
+function buildAssociationAid(meta, lowerWord, meaning) {
+  const typeText = String(meta?.type || '').toLowerCase()
+  if (typeText.includes('v'))
+    return { type: 'association', title: '联想', content: `先把它放回一个动作场景里，直接记成“做出 ${meaning} 这个动作”。` }
+  if (typeText.includes('adj'))
+    return { type: 'association', title: '联想', content: `把它当成给事物贴的标签，看到词就想到“${meaning} 这种特征”。` }
+  return { type: 'association', title: '联想', content: `先用一个最常见的使用场景记住它：${meaning}。` }
+}
+
+function getMemoryAid(meta) {
+  if (!meta)
+    return { type: 'association', title: '联想', content: '' }
+
   const word = normalizeWord(meta.word)
-  const meaning = meta.meaning.split('；').filter(Boolean)[0] || '核心含义'
-  const synonym = meta.synonyms?.[0] || ''
-  const typeText = meta.type.toLowerCase()
   const lowerWord = word.toLowerCase()
+  const meaning = String(meta.meaning || '').split('；').filter(Boolean)[0] || '核心含义'
 
   if (buildLookupTokens(word).length > 1)
-    return `先把 "${word}" 当成整块短语记，不要逐字拆散。先锁定整体义“${meaning}”，再看内部是不是熟词组合；如果能和同义替换 ${synonym || '或例句语境'} 对上，这个短语会更稳。`
+    return { type: 'chunk', title: '词块', content: `${word} = ${meaning}` }
 
-  const prefixRules = [
-    { match: 'inter', hint: 'inter- 常表示“在……之间、相互”' },
-    { match: 'trans', hint: 'trans- 常表示“跨越、转移、传递”' },
-    { match: 'super', hint: 'super- 常表示“上、超、过度”' },
-    { match: 'under', hint: 'under- 常表示“在下、不足”' },
-    { match: 'sub', hint: 'sub- 常表示“下、次级、细分”' },
-    { match: 'pre', hint: 'pre- 常表示“在前、预先”' },
-    { match: 'post', hint: 'post- 常表示“在后、之后”' },
-    { match: 're', hint: 're- 常表示“再、回、重新”' },
-    { match: 'un', hint: 'un- 常表示“否定、相反”' },
-    { match: 'in', hint: 'in- / im- / il- / ir- 常表示“否定”' },
-    { match: 'im', hint: 'in- / im- / il- / ir- 常表示“否定”' },
-    { match: 'il', hint: 'in- / im- / il- / ir- 常表示“否定”' },
-    { match: 'ir', hint: 'in- / im- / il- / ir- 常表示“否定”' },
-    { match: 'dis', hint: 'dis- 常表示“分开、否定、反向”' },
-    { match: 'mis', hint: 'mis- 常表示“错、坏、误”' },
-    { match: 'anti', hint: 'anti- 常表示“反对、对抗”' },
-    { match: 'pro', hint: 'pro- 常表示“向前、支持”' },
-    { match: 'con', hint: 'con- / com- / col- / cor- 常表示“共同、加强”' },
-    { match: 'com', hint: 'con- / com- / col- / cor- 常表示“共同、加强”' },
-  ]
-
-  const suffixRules = [
-    { match: 'ization', hint: '-ization 常表示“使……化的过程/结果”' },
-    { match: 'ation', hint: '-ation 常表示“动作、过程或结果”' },
-    { match: 'ition', hint: '-ition 常表示“动作、状态或结果”' },
-    { match: 'tion', hint: '-tion / -sion 常把词拉向“行为、结果、状态”名词' },
-    { match: 'sion', hint: '-tion / -sion 常把词拉向“行为、结果、状态”名词' },
-    { match: 'ment', hint: '-ment 常表示“结果、事物、状态”' },
-    { match: 'ness', hint: '-ness 常把形容词变成“性质、状态”名词' },
-    { match: 'ity', hint: '-ity 常表示“性质、特征、状态”' },
-    { match: 'ism', hint: '-ism 常表示“主义、现象、做法”' },
-    { match: 'ist', hint: '-ist 常表示“从事者、某类人”' },
-    { match: 'ship', hint: '-ship 常表示“关系、状态、身份”' },
-    { match: 'able', hint: '-able / -ible 常表示“能够……的、适合……的”' },
-    { match: 'ible', hint: '-able / -ible 常表示“能够……的、适合……的”' },
-    { match: 'ive', hint: '-ive 常见于形容词，表示“具有……倾向/性质”' },
-    { match: 'ous', hint: '-ous 常见于形容词，表示“充满……的、有……性质的”' },
-    { match: 'ful', hint: '-ful 常表示“充满……的”' },
-    { match: 'less', hint: '-less 常表示“没有、缺乏”' },
-    { match: 'al', hint: '-al 常把词变成“与……有关的”形容词' },
-    { match: 'ary', hint: '-ary 常表示“与……有关的、……性质的”' },
-    { match: 'ory', hint: '-ory 常表示“具有……性质的”' },
-    { match: 'ly', hint: '-ly 常见于副词，也可能是形容词尾，先判断它修饰动作还是描述性质' },
-  ]
-
-  const rootRules = [
-    { match: 'spect', hint: '词根 spect 常和“看”有关' },
-    { match: 'vis', hint: '词根 vis / vid 常和“看”有关' },
-    { match: 'vid', hint: '词根 vis / vid 常和“看”有关' },
-    { match: 'dict', hint: '词根 dict 常和“说、表述”有关' },
-    { match: 'scribe', hint: '词根 scrib / script 常和“写”有关' },
-    { match: 'script', hint: '词根 scrib / script 常和“写”有关' },
-    { match: 'port', hint: '词根 port 常和“搬运、携带”有关' },
-    { match: 'tract', hint: '词根 tract 常和“拉、拖”有关' },
-    { match: 'struct', hint: '词根 struct 常和“建、构造”有关' },
-    { match: 'form', hint: '词根 form 常和“形状、形成”有关' },
-    { match: 'ject', hint: '词根 ject 常和“扔、投”有关' },
-    { match: 'gress', hint: '词根 gress 常和“走、前进”有关' },
-    { match: 'grad', hint: '词根 grad 常和“步、级、逐步”有关' },
-    { match: 'press', hint: '词根 press 常和“压、按”有关' },
-    { match: 'cede', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
-    { match: 'ceed', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
-    { match: 'cess', hint: '词根 ced / ceed / cess 常和“走、让步、前进”有关' },
-    { match: 'mit', hint: '词根 mit / miss 常和“送、放出”有关' },
-    { match: 'miss', hint: '词根 mit / miss 常和“送、放出”有关' },
-    { match: 'pel', hint: '词根 pel / puls 常和“推、驱动”有关' },
-    { match: 'puls', hint: '词根 pel / puls 常和“推、驱动”有关' },
-    { match: 'rupt', hint: '词根 rupt 常和“断裂”有关' },
-    { match: 'tain', hint: '词根 tain / tent 常和“拿住、保持”有关' },
-    { match: 'tent', hint: '词根 tain / tent 常和“拿住、保持”有关' },
-    { match: 'cur', hint: '词根 cur / cour / curs 常和“跑、发生”有关' },
-    { match: 'cour', hint: '词根 cur / cour / curs 常和“跑、发生”有关' },
-    { match: 'curs', hint: '词根 cur / cour / curs 常和“跑、发生”有关' },
-  ]
-
-  const prefixHint = prefixRules.find(rule => lowerWord.startsWith(rule.match) && lowerWord.length - rule.match.length >= 3)?.hint
-  const suffixHint = suffixRules.find(rule => lowerWord.endsWith(rule.match) && lowerWord.length - rule.match.length >= 3)?.hint
-  const rootHint = rootRules.find(rule => lowerWord.includes(rule.match))?.hint
-  const structureHints = [prefixHint, rootHint, suffixHint].filter(Boolean)
-
-  if (structureHints.length) {
-    const helper = synonym
-      ? `再拿同义替换 ${synonym} 对照，看题目里通常是怎么改写它的。`
-      : '最后回到例句里，看它究竟落在什么语境里。'
-    return `${structureHints.join('；')}。背 ${word} 时，先沿着构词线索推到“${meaning}”，不要死背整串字母；${helper}`
+  const presetFormation = MEMORY_AID_FORMATION_PRESETS[lowerWord]
+  if (presetFormation) {
+    return {
+      type: 'formation',
+      title: '词根词缀',
+      parts: presetFormation.parts,
+      bridge: `从「${presetFormation.parts.map(part => part.meaning).join(' + ')}」想到“${presetFormation.bridge}”，引申为“${meaning}”。`,
+      final: meaning,
+    }
   }
 
-  if (typeText.includes('v'))
-    return `这个词更适合按“动作词”来记。先抓核心义“${meaning}”，再想是谁在做这个动作、动作指向谁；如果暂时拆不出词根词缀，就先用动作场景把它固定下来。`
+  const genericFormation = buildGenericFormationAid(lowerWord, meaning)
+  if (genericFormation)
+    return genericFormation
 
-  if (typeText.includes('adj'))
-    return `把 ${word} 当成“给名词贴标签”的描述词记。先锁定它描述的特征“${meaning}”，再想它最常修饰哪类人、事物或现象。`
+  const chunk = findMemoryAidChunk(meta, lowerWord)
+  if (chunk)
+    return { type: 'chunk', title: '词块', content: chunk }
 
-  if (typeText.includes('adv'))
-    return `把 ${word} 放回动作里记，重点看它如何补充“怎么发生、到什么程度”。副词单独背容易飘，最好连同它常修饰的动词一起记。`
+  return buildAssociationAid(meta, lowerWord, meaning)
+}
 
-  return `如果暂时拆不出稳定词根词缀，就先把 ${word} 和“${meaning}”做一对一绑定${synonym ? `，再借助同义替换 ${synonym}` : ''}和例句场景反复复现。先保证会认，再慢慢补构词感觉。`
+function buildMemoryHint(meta) {
+  const aid = getMemoryAid(meta)
+  if (aid.type === 'formation')
+    return `${aid.parts.map(part => `${part.text}=${part.meaning}`).join('；')}。${aid.bridge}`
+  return aid.content || ''
 }
 
 function createMetaFromRow(row) {
@@ -1586,12 +2034,28 @@ async function showWordToast(meta, event) {
                 {{ flashcardStats.tenPlus }}
               </p>
             </div>
+            <div class="rounded-xl bg-teal-50 px-4 py-3 text-sm dark:bg-teal-500/10">
+              <p class="text-xs tracking-wide uppercase text-teal-700 dark:text-teal-300">
+                熟词直过
+              </p>
+              <p class="mt-1 text-lg font-semibold text-teal-800 dark:text-teal-200">
+                {{ flashcardStats.masteredByUser }}
+              </p>
+            </div>
+            <div class="rounded-xl bg-cyan-50 px-4 py-3 text-sm dark:bg-cyan-500/10">
+              <p class="text-xs tracking-wide uppercase text-cyan-700 dark:text-cyan-300">
+                待抽查熟词
+              </p>
+              <p class="mt-1 text-lg font-semibold text-cyan-800 dark:text-cyan-200">
+                {{ flashcardStats.masteredDue }}
+              </p>
+            </div>
             <div class="rounded-xl bg-emerald-50 px-4 py-3 text-sm dark:bg-emerald-500/10">
               <p class="text-xs tracking-wide uppercase text-emerald-700 dark:text-emerald-300">
                 烂熟于心
               </p>
               <p class="mt-1 text-lg font-semibold text-emerald-800 dark:text-emerald-200">
-                {{ flashcardStats.mastered }}
+                {{ flashcardStats.overlearned }}
               </p>
             </div>
           </div>
@@ -1622,6 +2086,16 @@ async function showWordToast(meta, event) {
             <button
               type="button"
               class="border rounded-full px-3 py-1 text-xs font-medium transition"
+              :class="flashcardReviewOptions.reviewMode === 'active'
+                ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="setReviewMode('active')"
+            >
+              常规复习
+            </button>
+            <button
+              type="button"
+              class="border rounded-full px-3 py-1 text-xs font-medium transition"
               :class="flashcardReviewOptions.reviewMode === 'all'
                 ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
                 : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
@@ -1638,6 +2112,16 @@ async function showWordToast(meta, event) {
               @click="setReviewMode('unknown')"
             >
               只复习“不认识”
+            </button>
+            <button
+              type="button"
+              class="border rounded-full px-3 py-1 text-xs font-medium transition"
+              :class="flashcardReviewOptions.reviewMode === 'mastered'
+                ? 'border-teal-200 bg-teal-50 text-teal-700 dark:border-teal-500/30 dark:bg-teal-500/10 dark:text-teal-300'
+                : 'border-gray-200 bg-gray-100 text-gray-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300'"
+              @click="setReviewMode('mastered')"
+            >
+              只看熟词
             </button>
             <button
               type="button"
@@ -1677,10 +2161,13 @@ async function showWordToast(meta, event) {
               清除闪卡学习记录
             </button>
             <span class="text-xs text-gray-500 dark:text-gray-400">
-              `U`=不认识并翻面且已自动记入不认识；正面 `K`=认识翻面后背面 `K`/`U` 选对错；`Space`/`Enter` 仅背面翻回正面；`←/→` 切卡，`R` 随机
+              `U`=不认识并翻面且已自动记入不认识；正面 `K`=认识翻面后背面 `K`/`U` 选对错；`M`=标熟词并默认跳过常规复习；`Space`/`Enter` 仅背面翻回正面；`←/→` 切卡，`R` 随机
             </span>
             <span class="text-xs text-gray-500 dark:text-gray-400">
               正面选「不认识」翻面即记入不认识；选「认识」后点「错」也会标记为不认识；点「对」累计 1 次正确记忆
+            </span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">
+              「常规复习」默认隐藏熟词，但到期抽查的熟词会自动回到队列；如需检查，可切到「只看熟词」或「全部单词」
             </span>
             <span class="text-xs text-gray-500 dark:text-gray-400">
               当前分类：{{ flashcardCategoryFilter === 'all' ? '全部' : flashcardCategoryFilter }}
@@ -1699,29 +2186,42 @@ async function showWordToast(meta, event) {
                 <span>{{ flashcardIndex + 1 }} / {{ flashcardDeck.length }}</span>
                 <span
                   class="rounded-full border px-3 py-1 font-medium"
-                  :class="getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).className"
-                  :title="getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).hint"
+                  :class="getMemoryStageMeta(currentFlashcard.statusKey, currentFlashcard.category).className"
+                  :title="getMemoryStageMeta(currentFlashcard.statusKey, currentFlashcard.category).hint"
                 >
-                  {{ getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).label }}
+                  {{ getMemoryStageMeta(currentFlashcard.statusKey, currentFlashcard.category).label }}
                 </span>
                 <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
-                  已记住 {{ getFlashcardMemoryCount(currentFlashcard.word) }} 次
+                  已记住 {{ getFlashcardMemoryCount(currentFlashcard.statusKey) }} 次
                 </span>
                 <span
                   class="rounded-full px-3 py-1"
-                  :class="getFlashcardStatus(currentFlashcard.word) === 'known'
+                  :class="getFlashcardStatus(currentFlashcard.statusKey) === 'known'
                     ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
-                    : getFlashcardStatus(currentFlashcard.word) === 'unknown'
+                    : getFlashcardStatus(currentFlashcard.statusKey) === 'unknown'
                       ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
-                      : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
+                      : getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'
+                        ? 'bg-teal-50 text-teal-700 dark:bg-teal-500/10 dark:text-teal-300'
+                        : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
                 >
                   {{
-                    getFlashcardStatus(currentFlashcard.word) === 'known'
+                    getFlashcardStatus(currentFlashcard.statusKey) === 'known'
                       ? '已标记：我认识'
-                      : getFlashcardStatus(currentFlashcard.word) === 'unknown'
+                      : getFlashcardStatus(currentFlashcard.statusKey) === 'unknown'
                         ? '已标记：不认识'
+                        : getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'
+                          ? '已标记：熟词直过'
                         : '未标记'
                   }}
+                </span>
+                <span
+                  v-if="getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'"
+                  class="rounded-full px-3 py-1"
+                  :class="isFlashcardDueForMasteredCheck(currentFlashcard.statusKey)
+                    ? 'bg-cyan-50 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300'
+                    : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'"
+                >
+                  {{ isFlashcardDueForMasteredCheck(currentFlashcard.statusKey) ? '抽查到期' : '低频维护中' }}
                 </span>
               </div>
               <div class="flex items-center gap-2">
@@ -1772,12 +2272,41 @@ async function showWordToast(meta, event) {
                 <div class="mb-6 flex flex-wrap items-center justify-center gap-3 text-xl">
                   <span
                     class="rounded-full border px-4 py-1.5 font-medium"
-                    :class="getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).className"
+                    :class="getMemoryStageMeta(currentFlashcard.statusKey, currentFlashcard.category).className"
                   >
-                    {{ getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).label }}
+                    {{ getMemoryStageMeta(currentFlashcard.statusKey, currentFlashcard.category).label }}
                   </span>
                   <span class="rounded-full bg-slate-100 px-4 py-1.5 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
-                    已记住 {{ getFlashcardMemoryCount(currentFlashcard.word) }} 次
+                    已记住 {{ getFlashcardMemoryCount(currentFlashcard.statusKey) }} 次
+                  </span>
+                  <span
+                    class="rounded-full px-4 py-1.5"
+                    :class="getFlashcardStatus(currentFlashcard.statusKey) === 'known'
+                      ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+                      : getFlashcardStatus(currentFlashcard.statusKey) === 'unknown'
+                        ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
+                        : getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'
+                          ? 'bg-teal-50 text-teal-700 dark:bg-teal-500/10 dark:text-teal-300'
+                          : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
+                  >
+                    {{
+                      getFlashcardStatus(currentFlashcard.statusKey) === 'known'
+                        ? '已标记：我认识'
+                        : getFlashcardStatus(currentFlashcard.statusKey) === 'unknown'
+                          ? '已标记：不认识'
+                          : getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'
+                            ? '已标记：熟词直过'
+                            : '未标记'
+                    }}
+                  </span>
+                  <span
+                    v-if="getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'"
+                    class="rounded-full px-4 py-1.5"
+                    :class="isFlashcardDueForMasteredCheck(currentFlashcard.statusKey)
+                      ? 'bg-cyan-50 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300'
+                      : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'"
+                  >
+                    {{ isFlashcardDueForMasteredCheck(currentFlashcard.statusKey) ? '抽查到期' : '低频维护中' }}
                   </span>
                 </div>
                 <h4 class="text-[6.75rem] leading-none font-bold text-gray-900 dark:text-white">
@@ -1807,9 +2336,17 @@ async function showWordToast(meta, event) {
                     不认识
                     <span class="mt-1 block text-sm font-normal opacity-70">U</span>
                   </button>
+                  <button
+                    type="button"
+                    class="rounded-xl border-2 border-teal-200 bg-teal-50 px-8 py-4 text-2xl font-semibold text-teal-700 transition hover:border-teal-300 dark:border-teal-500/40 dark:bg-teal-500/15 dark:text-teal-200"
+                    @click="markFlashcardMastered"
+                  >
+                    熟词直过
+                    <span class="mt-1 block text-sm font-normal opacity-70">M · 跳过常规复习</span>
+                  </button>
                 </div>
                 <p class="mt-8 text-xl text-amber-600 dark:text-amber-400">
-                  选认识后：背面用 <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">K</kbd>（对）/ <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">U</kbd>（错）；<kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">Space</kbd> 可翻回正面
+                  选认识后：背面用 <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">K</kbd>（对）/ <kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">U</kbd>（错）；<kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">M</kbd> 可直接标熟词；<kbd class="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-sm dark:border-gray-600 dark:bg-gray-800">Space</kbd> 可翻回正面
                 </p>
               </div>
 
@@ -1820,7 +2357,11 @@ async function showWordToast(meta, event) {
                       Flashcard Back
                     </p>
                     <p v-if="flashcardPretest === 'known'" class="mt-2 text-xl text-gray-600 dark:text-gray-300">
-                      你正面选了「认识」——请对照释义，用「对 / 错」判断回忆是否准确
+                      {{
+                        getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'
+                          ? '这是一次熟词抽查——请对照释义，用「对 / 错」判断是否仍能稳定回忆'
+                          : '你正面选了「认识」——请对照释义，用「对 / 错」判断回忆是否准确'
+                      }}
                     </p>
                     <p v-else class="mt-2 text-xl text-amber-800 dark:text-amber-200">
                       你已选「不认识」：已自动记入「不认识」，请认真阅读下方释义与例句
@@ -1837,15 +2378,18 @@ async function showWordToast(meta, event) {
                     <div class="mt-5 flex flex-wrap items-center gap-3 text-xl">
                       <span
                         class="rounded-full border px-4 py-1.5 font-medium"
-                        :class="getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).className"
+                        :class="getMemoryStageMeta(currentFlashcard.statusKey, currentFlashcard.category).className"
                       >
-                        {{ getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).label }}
+                        {{ getMemoryStageMeta(currentFlashcard.statusKey, currentFlashcard.category).label }}
                       </span>
                       <span class="rounded-full bg-slate-100 px-4 py-1.5 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
-                        已记住 {{ getFlashcardMemoryCount(currentFlashcard.word) }} 次
+                        已记住 {{ getFlashcardMemoryCount(currentFlashcard.statusKey) }} 次
                       </span>
                       <span class="text-lg text-gray-500 dark:text-gray-400">
-                        {{ getMemoryStageMeta(currentFlashcard.word, currentFlashcard.category).hint }}
+                        {{ getMemoryStageMeta(currentFlashcard.statusKey, currentFlashcard.category).hint }}
+                      </span>
+                      <span v-if="getFlashcardStatus(currentFlashcard.statusKey) === 'mastered'" class="text-lg text-cyan-700 dark:text-cyan-300">
+                        已通过抽查 {{ getMasteredCheckCount(currentFlashcard.statusKey) }} 次
                       </span>
                     </div>
                   </div>
@@ -1857,7 +2401,7 @@ async function showWordToast(meta, event) {
                         @click="confirmFlashcardBack(true)"
                       >
                         对
-                        <span class="mt-1 block text-sm font-normal opacity-80">与背面一致 → 我认识 · 快捷键 K</span>
+                        <span class="mt-1 block text-sm font-normal opacity-80">{{ getFlashcardStatus(currentFlashcard.statusKey) === 'mastered' ? '抽查通过 → 继续留在熟词队列 · 快捷键 K' : '与背面一致 → 我认识 · 快捷键 K' }}</span>
                       </button>
                       <button
                         type="button"
@@ -1865,10 +2409,18 @@ async function showWordToast(meta, event) {
                         @click="confirmFlashcardBack(false)"
                       >
                         错
-                        <span class="mt-1 block text-sm font-normal opacity-80">记错了 → 标记不认识 · 快捷键 U</span>
+                        <span class="mt-1 block text-sm font-normal opacity-80">{{ getFlashcardStatus(currentFlashcard.statusKey) === 'mastered' ? '抽查失败 → 降级为不认识并回到常规复习 · 快捷键 U' : '记错了 → 标记不认识 · 快捷键 U' }}</span>
                       </button>
                     </div>
                     <div class="flex flex-wrap items-center gap-2 sm:justify-end">
+                      <button
+                        type="button"
+                        class="border border-teal-300 rounded-lg bg-teal-50 px-5 py-3 text-2xl font-semibold text-teal-800 dark:border-teal-500/40 dark:bg-teal-500/15 dark:text-teal-200 hover:bg-teal-100 dark:hover:bg-teal-500/25"
+                        @click="markFlashcardMastered"
+                      >
+                        标为熟词
+                        <span class="mt-1 block text-sm font-normal opacity-80">跳过常规复习 · 快捷键 M</span>
+                      </button>
                       <button
                         type="button"
                         class="i-carbon-volume-up-filled text-5xl text-gray-500 dark:text-gray-400 hover:text-blue-600"
@@ -1895,21 +2447,67 @@ async function showWordToast(meta, event) {
                       {{ currentFlashcard.synonyms.length ? currentFlashcard.synonyms.join(', ') : '暂无' }}
                     </p>
                   </div>
-                  <div>
+                  <div class="rounded-xl bg-blue-50 px-5 py-5 dark:bg-blue-500/10">
+                    <p class="text-2xl font-medium tracking-wide uppercase text-blue-700 dark:text-blue-300">
+                      {{ currentMemoryAid.title }}
+                    </p>
+                    <template v-if="currentMemoryAid.type === 'formation'">
+                      <div class="mt-3 space-y-3 text-blue-900 dark:text-blue-100">
+                        <div class="flex flex-wrap gap-2">
+                          <span
+                            v-for="part in currentMemoryAid.parts"
+                            :key="part.text"
+                            class="rounded-full bg-white/80 px-3 py-1 text-2xl font-medium dark:bg-slate-900/40"
+                          >
+                            {{ part.text }} = {{ part.meaning }}
+                          </span>
+                        </div>
+                        <p class="leading-[1.5]">
+                          {{ currentMemoryAid.bridge }}
+                        </p>
+                        <p class="text-2xl font-medium">
+                          词义：{{ currentMemoryAid.final }}
+                        </p>
+                      </div>
+                    </template>
+                    <p v-else class="mt-3 leading-[1.5] text-blue-900 dark:text-blue-100">
+                      {{ currentMemoryAid.content }}
+                    </p>
+                  </div>
+                  <div @click.stop>
                     <p class="text-2xl font-medium tracking-wide uppercase text-gray-500 dark:text-gray-400">
                       雅思例句
                     </p>
                     <p class="mt-3 leading-[1.5]">
                       {{ currentFlashcard.example || '暂未找到例句。' }}
                     </p>
-                  </div>
-                  <div class="rounded-xl bg-blue-50 px-5 py-5 dark:bg-blue-500/10">
-                    <p class="text-2xl font-medium tracking-wide uppercase text-blue-700 dark:text-blue-300">
-                      助记提示
-                    </p>
-                    <p class="mt-3 leading-[1.5] text-blue-900 dark:text-blue-100">
-                      {{ buildMemoryHint(currentFlashcard) }}
-                    </p>
+                    <template v-if="currentFlashcard.example">
+                      <button
+                        type="button"
+                        class="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20"
+                        @click.stop="toggleExampleTranslation(currentFlashcard)"
+                      >
+                        {{
+                          isExampleTranslationLoading(currentFlashcard)
+                            ? '翻译中...'
+                            : isExampleTranslationVisible(currentFlashcard)
+                              ? '收起翻译'
+                              : '翻译'
+                        }}
+                      </button>
+                      <p
+                        v-if="isExampleTranslationVisible(currentFlashcard) && getExampleTranslation(currentFlashcard)"
+                        class="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-[0.9em] text-slate-700 dark:bg-slate-800/70 dark:text-slate-200"
+                      >
+                        {{ getExampleTranslation(currentFlashcard) }}
+                      </p>
+                      <p
+                        v-else-if="isExampleTranslationVisible(currentFlashcard) && getExampleTranslationError(currentFlashcard)"
+                        class="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-[0.9em] text-rose-700 dark:bg-rose-500/10 dark:text-rose-300"
+                      >
+                        {{ getExampleTranslationError(currentFlashcard) }}
+                      </p>
+                    </template>
                   </div>
                 </div>
               </div>
