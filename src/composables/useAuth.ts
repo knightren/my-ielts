@@ -131,7 +131,6 @@ export async function initAuth() {
 
     if (event === 'SIGNED_OUT') {
       stopPeriodicSync()
-      clearForceSignedOut()
       return
     }
 
