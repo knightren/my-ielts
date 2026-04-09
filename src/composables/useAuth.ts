@@ -1,4 +1,4 @@
-import type { User } from '@supabase/supabase-js'
+import type { Session, User } from '@supabase/supabase-js'
 import { supabase } from '~/lib/supabase'
 import { pushLocalProgressToCloud, syncProgressAfterAuth } from '~/lib/progress-sync'
 
@@ -10,17 +10,17 @@ let syncTimer: ReturnType<typeof setInterval> | null = null
 let syncSoonTimer: ReturnType<typeof setTimeout> | null = null
 const SYNC_MS = 45_000
 const FORCE_SIGNED_OUT_KEY = 'supabase_force_signed_out'
+const SUPABASE_AUTH_PREFIXES = ['sb-', 'supabase.auth.token']
 
 function clearSupabaseAuthStorage() {
   if (typeof window === 'undefined')
     return
 
-  const prefixes = ['sb-', 'supabase.auth.token']
   for (const storage of [window.localStorage, window.sessionStorage]) {
     const keysToRemove: string[] = []
     for (let i = 0; i < storage.length; i++) {
       const key = storage.key(i)
-      if (key && prefixes.some(prefix => key.startsWith(prefix)))
+      if (key && SUPABASE_AUTH_PREFIXES.some(prefix => key.startsWith(prefix)))
         keysToRemove.push(key)
     }
     for (const key of keysToRemove)
@@ -66,6 +66,22 @@ function startPeriodicSync(userId: string) {
   }, SYNC_MS)
 }
 
+async function signOutLocally() {
+  if (!supabase)
+    return
+
+  const { error } = await supabase.auth.signOut({ scope: 'local' })
+  clearSupabaseAuthStorage()
+  if (error)
+    throw error
+}
+
+async function enforceSignedOutState() {
+  authUser.value = null
+  stopPeriodicSync()
+  await signOutLocally().catch(() => {})
+}
+
 async function runSessionSync(userId: string) {
   try {
     authError.value = null
@@ -97,6 +113,44 @@ export function requestProgressSync(delay = 1200) {
   }, delay)
 }
 
+async function handleInitialSession(session: Session | null) {
+  if (hasForceSignedOut()) {
+    if (session?.user)
+      await enforceSignedOutState()
+    else
+      clearForceSignedOut()
+
+    authReady.value = true
+    return
+  }
+
+  authUser.value = session?.user ?? null
+  if (session?.user)
+    await runSessionSync(session.user.id)
+
+  authReady.value = true
+}
+
+async function handleAuthEvent(event: string, session: { user?: User | null } | null) {
+  authUser.value = session?.user ?? null
+
+  if (event === 'INITIAL_SESSION') {
+    await handleInitialSession(session as Session | null)
+    return
+  }
+
+  if (event === 'SIGNED_OUT') {
+    stopPeriodicSync()
+    return
+  }
+
+  if (event === 'SIGNED_IN' && session?.user)
+    await runSessionSync(session.user.id)
+
+  if (event === 'TOKEN_REFRESHED' && session?.user)
+    startPeriodicSync(session.user.id)
+}
+
 export async function initAuth() {
   authReady.value = false
   if (!supabase) {
@@ -104,47 +158,18 @@ export async function initAuth() {
     return
   }
 
-  const client = supabase
+  if (hasForceSignedOut())
+    await enforceSignedOutState()
 
-  if (hasForceSignedOut()) {
-    clearSupabaseAuthStorage()
-    await client.auth.signOut({ scope: 'local' }).catch(() => {})
-    authUser.value = null
-  }
-
-  client.auth.onAuthStateChange(async (event, session) => {
-    authUser.value = session?.user ?? null
-
-    if (event === 'INITIAL_SESSION') {
-      if (hasForceSignedOut()) {
-        if (session?.user) {
-          await client.auth.signOut({ scope: 'local' }).catch(() => {})
-          clearSupabaseAuthStorage()
-          authUser.value = null
-        }
-        else {
-          clearForceSignedOut()
-        }
-        authReady.value = true
-        return
-      }
-
-      if (session?.user)
-        await runSessionSync(session.user.id)
+  supabase.auth.onAuthStateChange(async (event, session) => {
+    try {
+      await handleAuthEvent(event, session)
+    }
+    catch (e) {
+      console.error(e)
+      authError.value = e instanceof Error ? e.message : '认证状态更新失败'
       authReady.value = true
-      return
     }
-
-    if (event === 'SIGNED_OUT') {
-      stopPeriodicSync()
-      return
-    }
-
-    if (event === 'SIGNED_IN' && session?.user)
-      await runSessionSync(session.user.id)
-
-    if (event === 'TOKEN_REFRESHED' && session?.user)
-      startPeriodicSync(session.user.id)
   })
 }
 
@@ -176,11 +201,7 @@ export async function signOut() {
   stopPeriodicSync()
   authUser.value = null
   markForceSignedOut()
-
-  const { error } = await supabase.auth.signOut({ scope: 'local' })
-  clearSupabaseAuthStorage()
-  if (error)
-    throw error
+  await signOutLocally()
 }
 
 export function isSupabaseEnabled() {
