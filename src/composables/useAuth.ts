@@ -106,6 +106,12 @@ export async function initAuth() {
 
   const client = supabase
 
+  if (hasForceSignedOut()) {
+    clearSupabaseAuthStorage()
+    await client.auth.signOut({ scope: 'local' }).catch(() => {})
+    authUser.value = null
+  }
+
   client.auth.onAuthStateChange(async (event, session) => {
     authUser.value = session?.user ?? null
 
