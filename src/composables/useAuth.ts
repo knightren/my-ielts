@@ -111,11 +111,13 @@ export async function initAuth() {
 
     if (event === 'INITIAL_SESSION') {
       if (hasForceSignedOut()) {
-        clearForceSignedOut()
         if (session?.user) {
           await client.auth.signOut({ scope: 'local' }).catch(() => {})
           clearSupabaseAuthStorage()
           authUser.value = null
+        }
+        else {
+          clearForceSignedOut()
         }
         authReady.value = true
         return
@@ -129,6 +131,7 @@ export async function initAuth() {
 
     if (event === 'SIGNED_OUT') {
       stopPeriodicSync()
+      clearForceSignedOut()
       return
     }
 
